@@ -1,3 +1,4 @@
+"use client";
 // app/marketing/page.tsx
 import Link from 'next/link';
 
@@ -248,3 +249,4 @@ export default function MarketingPage() {
     </main>
   );
 }
+
