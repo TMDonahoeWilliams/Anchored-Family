@@ -1,6 +1,6 @@
 // app/marketing/page.tsx
 import Link from 'next/link';
-import '../styles/globals.css';
+import './styles/globals.css';
 
 export const metadata = {
   title: 'Anchored Family — Strong Families. Steady Rhythms.',
@@ -84,6 +84,7 @@ export default function MarketingPage() {
     </main>
   );
 }
+
 
 
 
