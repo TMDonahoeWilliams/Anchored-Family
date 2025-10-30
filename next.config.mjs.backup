@@ -1,0 +1,14 @@
+/** @type {import('next').NextConfig} */
+const nextConfig = {
+  experimental: { 
+    serverActions: {
+      allowedOrigins: ['localhost:3000', '*.vercel.app']
+    }
+  },
+  images: { remotePatterns: [{ protocol: 'https', hostname: '**' }] },
+  // Set turbopack root to silence workspace warning
+  turbopack: {
+    root: process.cwd()
+  }
+};
+export default nextConfig;

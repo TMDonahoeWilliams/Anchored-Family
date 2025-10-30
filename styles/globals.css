@@ -1,0 +1,390 @@
+/* =========================
+   Anchored Family — Base Styles
+   ========================= */
+
+/* Design tokens */
+:root {
+  --bg: #0b0b0b;
+  --fg: #111;
+  --brand: #2dbe9c;         /* page background */
+  --ink: #1a202c;           /* body text */
+  --ink-muted: #475569;     /* muted text */
+  --ring: #0ea5e9;          /* focus ring */
+  --violet: #7c3aed;        /* brand title color */
+  --offwhite: #f8fafc;      /* brandbar background */
+  --card: #ffffff;          /* generic card background */
+  --shadow-sm: 0 1px 0 rgba(0,0,0,.06), 0 6px 18px rgba(0,0,0,.08);
+  --shadow-md: 0 4px 16px rgba(0,0,0,.06);
+  --border: 1px solid rgba(0,0,0,.08);
+
+  /* New header vars */
+  --header-bg: rgba(255,255,255,.92);
+  --header-blur: saturate(150%) blur(6px);
+  --cta-bg: #0ea5e9;
+  --cta-bg-hover: #0284c7;
+  --cta-ink: #ffffff;
+}
+
+/* Global reset-ish */
+*,
+*::before,
+*::after { box-sizing: border-box; }
+
+html, body {
+  padding: 0;
+  margin: 0;
+}
+
+body {
+  background: var(--brand);
+  color: var(--ink);
+  font: 16px/1.45 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Add top padding so content doesn't sit under fixed header */
+body.has-topbar {
+  padding-top: 64px; /* matches .topbar height */
+}
+
+/* Containers */
+.container {
+  margin-left: auto;
+  margin-right: auto;
+  padding-left: 1rem;
+  padding-right: 1rem;
+  max-width: 1100px;
+}
+
+/* =========================
+   FIXED TOP BAR + CTA (NEW)
+   ========================= */
+
+.topbar {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  height: 64px;
+  display: flex;
+  align-items: center;
+  z-index: 50;
+  background: var(--header-bg);
+  backdrop-filter: var(--header-blur);
+  -webkit-backdrop-filter: var(--header-blur);
+  box-shadow: 0 1px 0 rgba(0,0,0,.06);
+  border-bottom: 1px solid rgba(0,0,0,.06);
+}
+
+.topbar__inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .75rem;
+  padding: 0 1rem;
+  width: 100%;
+  max-width: 1100px;
+  margin: 0 auto;
+}
+
+.topbar__brand {
+  display: inline-flex;
+  align-items: center;
+  gap: .5rem;
+  text-decoration: none;
+}
+
+.topbar__logo {
+  width: 28px; height: 28px; object-fit: contain;
+}
+
+.topbar__name {
+  font-weight: 800;
+  letter-spacing: .2px;
+  color: var(--violet);
+  font-size: 1rem;
+  line-height: 1;
+}
+
+/* Auth actions on the topbar */
+.auth-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: .5rem;
+}
+
+/* Outline button (Login) */
+.btn-outline {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: .5rem .85rem;
+  border-radius: .55rem;
+  border: 2px solid rgba(0,0,0,.1);
+  background: transparent;
+  color: var(--ink);
+  text-decoration: none;
+  font-weight: 750;
+  letter-spacing: .2px;
+  transition: background .2s ease, transform .08s ease, box-shadow .2s ease;
+}
+.btn-outline:hover { background: rgba(0,0,0,.04); transform: translateY(-1px); }
+
+/* Solid CTA (Sign up / Account) */
+.btn-solid {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: .55rem .95rem;
+  border-radius: .65rem;
+  background: var(--cta-bg);
+  color: var(--cta-ink);
+  text-decoration: none;
+  font-weight: 800;
+  letter-spacing: .2px;
+  box-shadow: var(--shadow-sm);
+  border: 2px solid transparent;
+  transition: background .2s ease, transform .08s ease, box-shadow .2s ease;
+}
+.btn-solid:hover { background: var(--cta-bg-hover); transform: translateY(-1px); }
+.btn-solid:focus-visible { outline: 3px solid var(--ring); outline-offset: 2px; }
+
+/* Optional small variant (if needed elsewhere) */
+.cta-create--sm { padding: .45rem .7rem; font-size: .9rem; }
+
+/* =========================
+   Header Brand Box
+   ========================= */
+.brandbar {
+  display: flex;
+  align-items: center;
+  gap: .75rem;
+  background: var(--offwhite);
+  border: var(--border);
+  border-radius: .75rem;
+  padding: .6rem .9rem;
+  box-shadow: var(--shadow-md);
+  margin: 1rem 0 .75rem;
+}
+
+.brandbar .logo {
+  width: 44px;
+  height: 44px;
+  object-fit: contain;
+  display: block;
+}
+
+.brandbar .brandname {
+  font-weight: 800;
+  letter-spacing: .2px;
+  color: var(--violet);
+  font-size: 1.15rem;
+  line-height: 1;
+}
+
+/* Page title under brand box */
+.page-title {
+  margin: .25rem 0 1rem;
+  font-weight: 800;
+  color: #000;
+  font-size: 1.6rem;
+}
+
+/* Optional subtitle */
+.subtitle {
+  color: var(--ink-muted);
+  font-size: .95rem;
+}
+
+/* Version pill (optional) */
+.pill {
+  display: inline-block;
+  font-size: .7rem;
+  font-weight: 700;
+  letter-spacing: .3px;
+  padding: .2rem .5rem;
+  border-radius: 999px;
+  background: #35dcb7;
+  color: #0f172a;
+}
+
+/* =========================
+   Categories Grid + Cards
+   ========================= */
+.categories {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: .75rem;
+  margin: .75rem 0 2rem;
+}
+@media (min-width: 640px) { .categories { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+@media (min-width: 1024px){ .categories { grid-template-columns: repeat(6, minmax(0, 1fr)); } }
+
+/* Each category is boxed */
+.category-card {
+  background: var(--card);
+  border: var(--border);
+  border-radius: .9rem;
+  padding: .5rem;
+  box-shadow: var(--shadow-sm);
+  display: flex;
+}
+
+/* Main button inside the category card */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: .5rem;
+  width: 100%;
+  padding: .85rem 1rem;
+  border-radius: .75rem;
+  border: 2px solid rgba(0, 0, 0, .08);
+  background: #fff;
+  color: var(--ink);
+  text-decoration: none;
+  font-weight: 700;
+  box-shadow: var(--shadow-sm);
+  transition: transform .08s ease, box-shadow .2s ease, background .2s ease;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  cursor: pointer;
+}
+.btn:hover { transform: translateY(-1px); box-shadow: 0 1px 0 rgba(0,0,0,.04), 0 10px 24px rgba(0,0,0,.12); }
+.btn:active { transform: translateY(0); box-shadow: 0 0 0 rgba(0,0,0,0); }
+.btn:focus-visible { outline: 3px solid var(--ring); outline-offset: 2px; }
+
+/* Smaller button variants */
+.btn--sm { padding: .65rem .85rem; font-weight: 700; }
+.btn--xs {
+  padding: 0.4rem 0.6rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+/* Accent borders */
+.accent-green  { border-color: #10b98122; }
+.accent-blue   { border-color: #3b82f622; }
+.accent-amber  { border-color: #f59e0b22; }
+.accent-rose   { border-color: #e11d4822; }
+.accent-violet { border-color: #7c3aed22; }
+.accent-magenta{ border-color: #d946ef22; }
+.accent-cyan   { border-color: #06b6d422; }
+
+/* =========================
+   Generic Cards / Sections
+   ========================= */
+.card {
+  background: var(--card);
+  border-radius: 1rem;
+  padding: 1rem;
+  border: var(--border);
+  box-shadow: var(--shadow-sm);
+}
+
+.section { margin-bottom: 1.5rem; }
+.section-title { font-weight: 700; margin-bottom: .75rem; }
+
+/* Subcategory button grid (smaller) */
+.subcategories {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: .5rem;
+}
+@media (min-width: 640px) { .subcategories { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (min-width: 1024px){ .subcategories { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+.subcategories .btn:hover { transform: translateY(-1px); }
+
+/* Optional icons before section titles */
+#family-planner   .section-title::before { content: "🗓️ "; }
+#family-table     .section-title::before { content: "🍽️ "; }
+#family-vault     .section-title::before { content: "🔐 "; }
+#family-devotion  .section-title::before { content: "📖 "; }
+#family-budget    .section-title::before { content: "💰 "; }
+#account          .section-title::before { content: "👤 "; }
+
+/* Themed borders for sections (optional) */
+#family-planner  .card { border-color: #3b82f622; }
+#family-table    .card { border-color: #f59e0b22; }
+#family-vault    .card { border-color: #7c3aed22; }
+#family-devotion .card { border-color: #10b98122; }
+#family-budget   .card { border-color: #d946ef22; }
+#account         .card { border-color: #06b6d422; }
+
+/* User Menu Dropdown Styles */
+.auth-actions {
+  display: flex;
+  align-items: center;
+}
+
+.user-menu-dropdown {
+  background: white;
+  border-radius: 8px;
+  box-shadow: var(--shadow-md);
+  border: var(--border);
+  z-index: 1000;
+}
+
+/* Responsive text hiding on small screens */
+@media (max-width: 640px) {
+  .user-menu-name { display: none; }
+}
+
+/* =========================
+   Marketing Page Overrides
+   ========================= */
+
+/* Allow the marketing page to show Tailwind's bg (e.g., bg-gray-50) instead of global --brand */
+.marketing {
+  background: transparent;
+}
+
+/* Keep category cards as real bordered boxes on the marketing page */
+.marketing .category-card {
+  background: var(--card);
+  border: var(--border);
+  border-radius: .9rem;
+  padding: .75rem;        /* light padding so inner content has room */
+  box-shadow: var(--shadow-sm);
+  display: block;         /* avoid flex forcing weird layouts in grid cells */
+}
+
+/* Ensure media fill containers nicely */
+video, img {
+  max-width: 100%;
+  height: auto;
+  display: block;
+}
+
+/* =========================
+   Page flags & topbar behavior
+   ========================= */
+
+/* 1) Marketing page: top bar is NOT fixed, and no extra body padding */
+body.page--marketing.has-topbar { padding-top: 0; }
+body.page--marketing .topbar {
+  position: static;               /* not fixed */
+  height: auto;                   /* shrink to content if needed */
+  background: transparent;        /* let page bg show */
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow: none;
+  border-bottom: 0;
+}
+
+/* 2) Account button/link lives in the top bar by default */
+.topbar .account-link { 
+  display: inline-flex; 
+  align-items: center; 
+}
+
+/* 3) Home page: hide Account button in top bar (remove it from Home only) */
+body.page--home .topbar .account-link {
+  display: none !important;
+}
+
+/* Utility: hide any element within Home content you mark explicitly */
+body.page--home .hide-on-home {
+  display: none !important;
+}
