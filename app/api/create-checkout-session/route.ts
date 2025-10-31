@@ -71,7 +71,7 @@ export async function POST(request: NextRequest) {
       },
     });
 
-    return NextResponse.redirect(session.url!, 303);
+    return NextResponse.json({ url: session.url });
   } catch (error) {
     console.error('Error creating checkout session:', error);
     
@@ -87,4 +87,5 @@ export async function POST(request: NextRequest) {
       { status: 500 }
     );
   }
+
 }
