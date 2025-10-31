@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@fullcalendar/core':
+        specifier: ^6.1.19
+        version: 6.1.19
       '@fullcalendar/daygrid':
         specifier: ^6.1.19
         version: 6.1.19(@fullcalendar/core@6.1.19)
@@ -4268,6 +4271,3 @@ snapshots:
 
   ws@8.18.3: {}
 
-  yocto-queue@0.1.0: {}
-
-  zlibjs@0.3.1: {}
