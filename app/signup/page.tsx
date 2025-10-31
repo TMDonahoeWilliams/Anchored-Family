@@ -176,13 +176,13 @@ export default function SignupPage() {
           <PlanCard
             code="pro"
             title="Plus"
-            price="$X.99 / mo"
+            price="$7.99 / mo"
             desc="Everything in Free + advanced budgeting, roles & sharing, priority support."
           />
           <PlanCard
             code="premium"
             title="Premium"
-            price="$Y.99 / mo"
+            price="$9.99 / mo"
             desc="Everything in Plus + deep study add-ons, family vault, and early access."
           />
         </div>
@@ -257,3 +257,4 @@ export default function SignupPage() {
     </div>
   );
 }
+
