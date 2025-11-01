@@ -47,7 +47,6 @@ export async function POST(request: NextRequest) {
       const priceMap: Record<string, string | undefined> = {
         pro: process.env.STRIPE_PRICE_ID_PRO,
         premium: process.env.STRIPE_PRICE_ID_PREMIUM,
-        enterprise: process.env.STRIPE_PRICE_ID_ENTERPRISE,
       };
       priceId = priceMap[plan];
       if (!priceId) {
@@ -142,3 +141,4 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: process.env.NODE_ENV !== 'production' ? String(err) : 'Unable to create checkout session' }, { status: 500 });
   }
 }
+
