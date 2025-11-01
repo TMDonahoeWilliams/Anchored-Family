@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getStripeInstance } from '@/lib/stripe';
 
-// Ensure Node runtime (Stripe Node SDK requires Node)
+// Ensure Node runtime if using Stripe Node SDK
 export const runtime = 'nodejs';
 
 function corsHeaders(origin?: string) {
@@ -27,9 +27,13 @@ export async function POST(request: NextRequest) {
     const stripe = getStripeInstance();
     if (!stripe) {
       console.error('Stripe not configured (missing secret key)');
-      return NextResponse.json({ error: 'Payment provider not configured' }, { status: 500, headers: corsHeaders() });
+      return NextResponse.json(
+        { error: 'Payment provider not configured' },
+        { status: 500, headers: corsHeaders(request.headers.get('origin') || undefined) }
+      );
     }
 
+    // Support JSON and form-data
     const contentType = (request.headers.get('content-type') || '').toLowerCase();
     let payload: any = null;
     if (contentType.includes('application/json')) {
@@ -39,41 +43,82 @@ export async function POST(request: NextRequest) {
       payload = fd ? Object.fromEntries(fd.entries()) : null;
     }
 
-    const { plan, orgId, userId, successPath, cancelPath } = payload || {};
-    if (!plan || !orgId || !userId) {
-      return NextResponse.json({ error: 'Missing required fields: plan, orgId, userId' }, { status: 400, headers: corsHeaders(request.headers.get('origin') || undefined) });
+    // Client may send either price_id or lookup_key (or both)
+    let { price_id: priceId, priceId: altPriceId, lookup_key: lookupKey, lookupKey, orgId, userId, successPath, cancelPath } = payload || {};
+    priceId = priceId ?? altPriceId;
+    lookupKey = lookupKey ?? lookupKey;
+
+    if (!priceId && !lookupKey) {
+      return NextResponse.json({ error: 'Price ID or lookup key is required' }, { status: 400, headers: corsHeaders(request.headers.get('origin') || undefined) });
     }
 
-    // Map plan keys to Stripe price IDs (set the env vars in production)
-    const priceMap: Record<string, string | undefined> = {
-      pro: process.env.STRIPE_PRICE_ID_PRO,
-      enterprise: process.env.STRIPE_PRICE_ID_ENTERPRISE,
-      premium: process.env.STRIPE_PRICE_ID_PREMIUM, // if you use premium
-    };
-
-    const priceId = priceMap[plan];
-    if (!priceId) {
-      console.error('Price ID not configured for plan:', plan);
-      return NextResponse.json({ error: 'Requested plan is not available' }, { status: 400, headers: corsHeaders(request.headers.get('origin') || undefined) });
+    // Disallow sentinel placeholders
+    if (priceId && priceId.includes('not_configured')) {
+      return NextResponse.json(
+        {
+          error:
+            'Stripe prices are not configured. Please set up products in the Stripe Dashboard and update STRIPE_PRICE_ID_* environment variables.',
+        },
+        { status: 500, headers: corsHeaders(request.headers.get('origin') || undefined) }
+      );
     }
 
-    // Build URLs
-    const origin = request.headers.get('origin') || process.env.NEXT_PUBLIC_SITE_URL;
+    // Determine origin for success/cancel URLs
+    const origin = request.headers.get('origin') || (request.nextUrl && (request.nextUrl as any).origin) || process.env.NEXT_PUBLIC_SITE_URL;
     if (!origin) {
-      console.error('No origin available to build redirect URLs');
+      console.error('Origin not available to build redirect URLs.');
       return NextResponse.json({ error: 'Server configuration error' }, { status: 500, headers: corsHeaders() });
     }
-    const successUrl = `${origin}${successPath || '/dashboard'}`;
-    const cancelUrl = `${origin}${cancelPath || '/settings/billing?canceled=1'}`;
 
-    // Create idempotency key to protect double requests (optional: allow client to send X-Idempotency-Key)
-    const idempotencyKey = request.headers.get('x-idempotency-key') || (globalThis.crypto && (globalThis.crypto as any).randomUUID ? (globalThis.crypto as any).randomUUID() : String(Date.now()));
+    // Resolve final price id (from lookup key if necessary)
+    let finalPriceId = priceId as string | undefined;
+    let resolvedPrice: any = null;
+    if (lookupKey && !finalPriceId) {
+      const prices = await stripe.prices.list({
+        lookup_keys: [lookupKey],
+        expand: ['data.product'],
+        limit: 1,
+      });
 
-    // Create checkout session
+      if (!prices || !prices.data || prices.data.length === 0) {
+        return NextResponse.json({ error: 'Price not found for lookup key' }, { status: 404, headers: corsHeaders(request.headers.get('origin') || undefined) });
+      }
+
+      resolvedPrice = prices.data[0];
+      finalPriceId = resolvedPrice.id;
+    }
+
+    if (!finalPriceId) {
+      return NextResponse.json({ error: 'Unable to resolve price for checkout' }, { status: 400, headers: corsHeaders(request.headers.get('origin') || undefined) });
+    }
+
+    // Validate that the price is recurring (required for subscription mode)
+    if (!resolvedPrice) {
+      try {
+        resolvedPrice = await stripe.prices.retrieve(finalPriceId);
+      } catch (e) {
+        console.error('Failed to retrieve price for validation', e);
+        return NextResponse.json({ error: 'Invalid price id provided' }, { status: 400, headers: corsHeaders(request.headers.get('origin') || undefined) });
+      }
+    }
+    if (resolvedPrice && !resolvedPrice.recurring) {
+      return NextResponse.json(
+        { error: 'Price is not a recurring price. Subscriptions require recurring prices.' },
+        { status: 400, headers: corsHeaders(request.headers.get('origin') || undefined) }
+      );
+    }
+
+    // Map optional success/cancel paths
+    const successUrl = `${origin}${successPath || '/account/settings/subscription/success'}`;
+    const cancelUrl = `${origin}${cancelPath || '/account/settings/subscription?canceled=true'}`;
+
+    // Create an idempotency key — allow caller to pass their own via header
+    const idempotencyKey = request.headers.get('x-idempotency-key') || `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+
+    // Create Checkout Session
     const session = await stripe.checkout.sessions.create({
-      payment_method_types: ['card'],
+      line_items: [{ price: finalPriceId, quantity: 1 }],
       mode: 'subscription',
-      line_items: [{ price: priceId, quantity: 1 }],
       success_url: `${successUrl}?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: cancelUrl,
       automatic_tax: { enabled: true },
@@ -85,23 +130,33 @@ export async function POST(request: NextRequest) {
       idempotencyKey,
     });
 
-    if (!session || !session.url) {
-      console.error('Stripe returned invalid session:', session);
+    if (!session) {
+      console.error('Stripe returned no session object');
       return NextResponse.json({ error: 'Failed to create checkout session' }, { status: 500, headers: corsHeaders(request.headers.get('origin') || undefined) });
     }
 
-    // Success
+    if (!session.url) {
+      console.error('Stripe session created but no URL returned', session);
+      return NextResponse.json({ error: 'Failed to create checkout URL' }, { status: 500, headers: corsHeaders(request.headers.get('origin') || undefined) });
+    }
+
     return NextResponse.json({ url: session.url, session_id: session.id }, { status: 200, headers: corsHeaders(request.headers.get('origin') || undefined) });
   } catch (err: any) {
-    // Log full stripe error (important for debugging). In production send a safe message to client.
-    console.error('[/api/billing/checkout] error:', err);
-    // If Stripe error object has useful info surface it to logs: err.message, err.type, err.raw
+    // Log full error server-side for debugging
+    console.error('Error creating checkout session:', err);
+    // In non-dev environments return a safe message to client
     const devMsg = process.env.NODE_ENV !== 'production' ? (err?.message || String(err)) : undefined;
     return NextResponse.json({ error: devMsg || 'Unable to create checkout session' }, { status: 500, headers: corsHeaders() });
   }
 }
 
-// Respond JSON for any other method to prevent empty 405 bodies
-export function GET() { return NextResponse.json({ error: 'Method not allowed' }, { status: 405, headers: corsHeaders() }); }
-export function PUT() { return NextResponse.json({ error: 'Method not allowed' }, { status: 405, headers: corsHeaders() }); }
-export function DELETE() { return NextResponse.json({ error: 'Method not allowed' }, { status: 405, headers: corsHeaders() }); }
+// Return explicit JSON for other methods (avoid empty 405)
+export function GET(request: NextRequest) {
+  return NextResponse.json({ error: 'Method not allowed' }, { status: 405, headers: corsHeaders(request.headers.get('origin') || undefined) });
+}
+export function PUT(request: NextRequest) {
+  return NextResponse.json({ error: 'Method not allowed' }, { status: 405, headers: corsHeaders(request.headers.get('origin') || undefined) });
+}
+export function DELETE(request: NextRequest) {
+  return NextResponse.json({ error: 'Method not allowed' }, { status: 405, headers: corsHeaders(request.headers.get('origin') || undefined) });
+}
