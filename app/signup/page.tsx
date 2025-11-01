@@ -22,7 +22,7 @@ export default function SignupPage() {
   const router = useRouter();
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [selectedPlan, setSelectedPlan] = useState<Plan>('free'); // Default Free
+  const [selectedPlan, setSelectedPlan] = useState<Plan>('basic'); // Default Basic
 
   // Manager (required)
   const [mgr, setMgr] = useState({
@@ -118,13 +118,13 @@ export default function SignupPage() {
       if (!householdId) throw new Error('Missing household id from signup response.');
 
       // 2) Plan branch
-      if (selectedPlan === 'free') {
+      if (selectedPlan === 'basic') {
         // Go verify email & login
         router.push('/login?checkEmail=1');
       } else {
         // Create Stripe checkout (plan = 'pro' | 'premium' — note: server may expect other strings)
         // IMPORTANT: confirm backend expects 'enterprise' for premium; if your backend expects 'premium' change below.
-        const billingPlan = selectedPlan === 'pro' ? 'pro' : 'enterprise';
+        const billingPlan = selectedPlan === 'plus' ? 'plus' : 'premium';
 
         const cRes = await fetch('/api/billing/checkout', {
           method: 'POST',
@@ -299,5 +299,6 @@ export default function SignupPage() {
     </div>
   );
 }
+
 
 
