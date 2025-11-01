@@ -210,13 +210,13 @@ export default function SignupPage() {
         <h2 className="section-title">Choose Your Plan</h2>
         <div className="subcategories" style={{ marginBottom: '.75rem' }}>
           <PlanCard
-            code="free"
-            title="Free"
-            price="$0"
+            code="basic"
+            title="Basic"
+            price="$1.99 / mo"
             desc="Core planner, basic devotions, shared calendar. Perfect to try Anchored Family."
           />
           <PlanCard
-            code="pro"
+            code="plus"
             title="Plus"
             price="$7.99 / mo"
             desc="Everything in Free + advanced budgeting, roles & sharing, priority support."
@@ -299,3 +299,4 @@ export default function SignupPage() {
     </div>
   );
 }
+
