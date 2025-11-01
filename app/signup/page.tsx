@@ -4,7 +4,7 @@ import { useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 
-type Plan = 'free' | 'pro' | 'premium';
+type Plan = 'basic' | 'pro' | 'premium';
 
 type MemberForm = {
   role: 'Child' | 'Teen' | 'Adult' | '';
@@ -299,4 +299,5 @@ export default function SignupPage() {
     </div>
   );
 }
+
 
