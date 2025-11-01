@@ -4,7 +4,7 @@ import { useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 
-type Plan = 'basic' | 'pro' | 'premium';
+type Plan = 'basic' | 'plus' | 'premium';
 
 type MemberForm = {
   role: 'Child' | 'Teen' | 'Adult' | '';
@@ -122,9 +122,9 @@ export default function SignupPage() {
         // Go verify email & login
         router.push('/login?checkEmail=1');
       } else {
-        // Create Stripe checkout (plan = 'pro' | 'premium' — note: server may expect other strings)
-        // IMPORTANT: confirm backend expects 'enterprise' for premium; if your backend expects 'premium' change below.
-        const billingPlan = selectedPlan === 'plus' ? 'plus' : 'premium';
+        // Create Stripe checkout (plan = 'plus' | 'premium')
+        // Send the plan string directly; ensure server maps 'plus'/'premium' to the correct Stripe price IDs.
+        const billingPlan = selectedPlan;
 
         const cRes = await fetch('/api/billing/checkout', {
           method: 'POST',
@@ -212,14 +212,14 @@ export default function SignupPage() {
           <PlanCard
             code="basic"
             title="Basic"
-            price="$1.99 / mo"
+            price="$0"
             desc="Core planner, basic devotions, shared calendar. Perfect to try Anchored Family."
           />
           <PlanCard
             code="plus"
             title="Plus"
             price="$7.99 / mo"
-            desc="Everything in Free + advanced budgeting, roles & sharing, priority support."
+            desc="Everything in Basic + advanced budgeting, roles & sharing, priority support."
           />
           <PlanCard
             code="premium"
@@ -299,6 +299,5 @@ export default function SignupPage() {
     </div>
   );
 }
-
 
 
