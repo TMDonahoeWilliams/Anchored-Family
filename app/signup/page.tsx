@@ -1,4 +1,3 @@
-// app/signup/page.tsx
 'use client';
 
 import { useState } from 'react';
@@ -72,6 +71,25 @@ export default function SignupPage() {
     return null;
   }
 
+  // Helper: safely parse a fetch Response.
+  // Reads text first so we can return clearer errors when the response is empty or not JSON.
+  async function safeParseResponse(res: Response, label = 'response') {
+    const text = await res.text();
+    if (!text) {
+      // Empty body
+      if (res.ok) return null;
+      throw new Error(`${label} returned empty body (status ${res.status}).`);
+    }
+    // Try parsing JSON; if it fails, surface the raw text for debugging
+    try {
+      return JSON.parse(text);
+    } catch (err) {
+      // Include a short preview of the raw response in the error so we can debug HTML/error pages
+      const preview = text.length > 1000 ? text.slice(0, 1000) + '…' : text;
+      throw new Error(`${label} returned invalid JSON: ${preview}`);
+    }
+  }
+
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
@@ -86,36 +104,60 @@ export default function SignupPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ manager: mgr, members, plan: selectedPlan }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || 'Sign up failed.');
 
-      const householdId = data.household_id as string | undefined;
-      if (!householdId) throw new Error('Missing household id.');
+      // Parse defensively (avoids throwing "Unexpected end of JSON input")
+      const data = await safeParseResponse(res, '/api/signup');
+
+      // If server responded non-2xx, prefer server error message when available
+      if (!res.ok) {
+        const serverMsg = data?.error || `Sign up failed with status ${res.status}`;
+        throw new Error(serverMsg);
+      }
+
+      const householdId = data?.household_id as string | undefined;
+      if (!householdId) throw new Error('Missing household id from signup response.');
 
       // 2) Plan branch
       if (selectedPlan === 'free') {
         // Go verify email & login
         router.push('/login?checkEmail=1');
       } else {
-        // Create Stripe checkout (plan = 'pro' | 'premium')
+        // Create Stripe checkout (plan = 'pro' | 'premium' — note: server may expect other strings)
+        // IMPORTANT: confirm backend expects 'enterprise' for premium; if your backend expects 'premium' change below.
+        const billingPlan = selectedPlan === 'pro' ? 'pro' : 'enterprise';
+
         const cRes = await fetch('/api/billing/checkout', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            plan: selectedPlan === 'pro' ? 'pro' : 'enterprise',
+            plan: billingPlan,
             orgId: householdId,            // treating household as org
             userId: mgr.user_id,           // your external id for admin/customer
             successPath: '/dashboard?welcome=1',
             cancelPath: '/settings/billing?canceled=1'
           }),
         });
-        const { url } = await cRes.json();
-        if (!cRes.ok || !url) throw new Error('Unable to start checkout.');
+
+        const cData = await safeParseResponse(cRes, '/api/billing/checkout');
+
+        if (!cRes.ok) {
+          const serverMsg = cData?.error || `Checkout init failed with status ${cRes.status}`;
+          throw new Error(serverMsg);
+        }
+
+        const url = cData?.url as string | undefined;
+        if (!url) {
+          // If server returned something unexpected, include raw data in the error
+          throw new Error(`Unable to start checkout: missing URL in response. Response preview: ${JSON.stringify(cData)}`);
+        }
+
         // 3) Redirect to Stripe
+        // window.location.assign is fine in client components
         window.location.assign(url);
       }
     } catch (e: any) {
-      setError(e.message || 'Something went wrong.');
+      // Show friendly message; keep the detailed message for debugging
+      setError(e?.message || 'Something went wrong.');
     } finally {
       setSubmitting(false);
     }
@@ -257,4 +299,3 @@ export default function SignupPage() {
     </div>
   );
 }
-
