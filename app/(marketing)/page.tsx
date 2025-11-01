@@ -46,7 +46,7 @@ export default function MarketingPage() {
           <h2 className="af-section-title">Choose Your Plan</h2>
           <div className="af-plans">
             <div className="af-plan">
-              <div className="af-plan-name">Free</div>
+              <div className="af-plan-name">Basic</div>
               <ul className="af-plan-list">
                 <li>Core family planner</li>
                 <li>Basic devotions (KJV)</li>
@@ -57,7 +57,7 @@ export default function MarketingPage() {
             <div className="af-plan">
               <div className="af-plan-name">Plus</div>
               <ul className="af-plan-list">
-                <li>Everything in Free</li>
+                <li>Everything in Basic</li>
                 <li>Advanced budgeting tools</li>
                 <li>Enhanced sharing & roles</li>
                 <li>Priority support</li>
@@ -83,6 +83,7 @@ export default function MarketingPage() {
     </main>
   );
 }
+
 
 
 
