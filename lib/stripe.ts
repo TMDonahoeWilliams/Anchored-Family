@@ -42,7 +42,7 @@ export const SUBSCRIPTION_PLANS = {
   BASIC: {
     name: 'Basic Plan',
     priceId: process.env.STRIPE_PRICE_ID_BASIC || 'price_not_configured',
-    price: 499, // $4.99 in cents
+    price: 799, // $7.99 in cents
     interval: 'month',
     features: [
       'Access to meal planning',
@@ -66,5 +66,6 @@ export const SUBSCRIPTION_PLANS = {
     ],
   },
 } as const;
+
 
 export type SubscriptionPlan = keyof typeof SUBSCRIPTION_PLANS;
