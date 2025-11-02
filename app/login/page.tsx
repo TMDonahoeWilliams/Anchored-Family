@@ -3,10 +3,13 @@ import React, { useState } from 'react';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { useRouter, useSearchParams } from 'next/navigation';
 
+export const dynamic = 'force-dynamic';
+
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL ?? '';
 const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? '';
 
 if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+  // eslint-disable-next-line no-console
   console.warn('Missing NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY env vars.');
 }
 
@@ -15,7 +18,6 @@ const supabaseClient: SupabaseClient = createClient(SUPABASE_URL, SUPABASE_ANON_
 export default function LoginPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  // <-- default changed from '/dashboard' to '/home'
   const nextParam = searchParams?.get('next') ?? '/home';
 
   const [identifier, setIdentifier] = useState(''); // email or username
@@ -113,7 +115,6 @@ export default function LoginPage() {
 
       await setServerSession(accessToken, expiresIn);
 
-      // redirect to /home (nextParam default is /home)
       router.replace(nextParam);
     } catch (err: any) {
       setError(err?.message ?? String(err));
@@ -193,21 +194,4 @@ export default function LoginPage() {
         {info && <div style={{ color: 'green', marginBottom: 8 }}>{info}</div>}
 
         <div style={{ display: 'flex', gap: 8 }}>
-          <button type="submit" disabled={loading} style={{ padding: '8px 14px' }}>
-            {loading ? 'Signing in…' : 'Sign in'}
-          </button>
-
-          <button
-            type="button"
-            onClick={() => {
-              router.push('/forgot-password');
-            }}
-            style={{ padding: '8px 14px' }}
-          >
-            Forgot password
-          </button>
-        </div>
-      </form>
-    </div>
-  );
-}
+          <
