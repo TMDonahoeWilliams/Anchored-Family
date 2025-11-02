@@ -1,7 +1,6 @@
 'use client';
 import React, { useEffect, useState } from 'react';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
-import { useRouter } from 'next/navigation';
 
 export const dynamic = 'force-dynamic';
 
@@ -18,37 +17,31 @@ const supabaseClient: SupabaseClient = createClient(SUPABASE_URL, SUPABASE_ANON_
 function sanitizeNext(next: string | null | undefined): string {
   if (!next) return '/home';
   try {
-    // Prevent open-redirects: only allow internal paths starting with '/'
-    const url = new URL(next, 'https://example.com'); // base to parse relative urls
+    const url = new URL(next, 'https://example.com');
     const path = url.pathname + (url.search || '') + (url.hash || '');
-    // If path is empty or not starting with '/', fallback
     if (!path || !path.startsWith('/')) return '/home';
     return path;
   } catch (e) {
-    // If parsing fails, fallback to '/home'
     return '/home';
   }
 }
 
 export default function LoginPage() {
-  const router = useRouter();
   const [nextParam, setNextParam] = useState('/home');
 
-  // Read next redirect param on client and sanitize
   useEffect(() => {
     try {
       const params = new URLSearchParams(window.location.search);
-      // Common keys: next, redirect, returnTo
       const rawNext = params.get('next') ?? params.get('redirect') ?? params.get('returnTo') ?? '/home';
       const safe = sanitizeNext(rawNext);
       setNextParam(safe);
-      console.log('[login] detected next param=', rawNext, 'sanitized=', safe);
+      console.log('[login] next param:', { rawNext, safe });
     } catch (e) {
       setNextParam('/home');
     }
   }, []);
 
-  const [identifier, setIdentifier] = useState(''); // email or username
+  const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
   const [mode, setMode] = useState<'email' | 'username' | 'auto'>('auto');
   const [loading, setLoading] = useState(false);
@@ -57,35 +50,40 @@ export default function LoginPage() {
 
   async function resolveEmailIfNeeded(id: string) {
     if (mode === 'email' || id.includes('@')) return id;
-    try {
-      const res = await fetch('/api/auth/username-to-email', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: id }),
-      });
-      if (!res.ok) {
-        const json = await res.json().catch(() => ({}));
-        throw new Error(json?.error || `Failed to resolve username (${res.status})`);
-      }
-      const json = await res.json();
-      if (!json?.email) throw new Error('No email found for that username');
-      return json.email as string;
-    } catch (err) {
-      throw err;
+    const res = await fetch('/api/auth/username-to-email', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: id }),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new Error(`Failed resolving username: ${res.status} ${body}`);
     }
+    const json = await res.json();
+    if (!json?.email) throw new Error('No email found for that username');
+    return json.email as string;
   }
 
-  // Send access token to server route to set HttpOnly cookie for SSR pages
   async function setServerSession(accessToken: string, expiresIn?: number) {
+    console.log('[login] calling set-server-session', { expiresIn });
     const res = await fetch('/api/auth/set-server-session', {
       method: 'POST',
-      credentials: 'same-origin', // ensure browser accepts cookies for same-origin
+      credentials: 'same-origin', // important: ensure cookies accepted for same-origin
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ access_token: accessToken, expires_in: expiresIn }),
     });
+    console.log('[login] set-server-session response', { ok: res.ok, status: res.status });
+    let text = '';
+    try {
+      // read body for debugging
+      text = await res.text();
+      console.log('[login] set-server-session response body:', text);
+    } catch (e) {
+      console.warn('[login] could not read response body', e);
+    }
     if (!res.ok) {
-      const json = await res.json().catch(() => ({}));
-      throw new Error(json?.error || `Failed to set server session (${res.status})`);
+      // raise with body to make errors obvious in UI and console
+      throw new Error(`set-server-session failed: ${res.status} ${text}`);
     }
     return true;
   }
@@ -95,11 +93,12 @@ export default function LoginPage() {
     setError(null);
     setInfo(null);
     setLoading(true);
+    console.log('[login] submit start', { identifier, mode });
 
     try {
       const trimmed = identifier.trim();
       if (!trimmed || !password) {
-        setError('Please enter your email/username and password.');
+        setError('Please enter an email/username and password.');
         setLoading(false);
         return;
       }
@@ -110,18 +109,16 @@ export default function LoginPage() {
       } else if (mode === 'username') {
         email = await resolveEmailIfNeeded(trimmed);
       } else {
-        if (trimmed.includes('@')) {
-          email = trimmed;
-        } else {
-          email = await resolveEmailIfNeeded(trimmed);
-        }
+        email = trimmed.includes('@') ? trimmed : await resolveEmailIfNeeded(trimmed);
       }
 
+      console.log('[login] attempting supabase signInWithPassword for', { email });
       const { data, error: signInError } = await supabaseClient.auth.signInWithPassword({
         email,
         password,
       });
 
+      console.log('[login] supabase sign-in result', { data, signInError });
       if (signInError) {
         setError(signInError.message ?? 'Sign in failed');
         setLoading(false);
@@ -130,28 +127,35 @@ export default function LoginPage() {
 
       const accessToken = data?.session?.access_token ?? null;
       const expiresAt = data?.session?.expires_at ?? null;
+      console.log('[login] session tokens', { accessTokenPresent: !!accessToken, expiresAt });
 
       if (!accessToken) {
-        setError('Sign in succeeded but no access token available for server session.');
+        setError('Sign in succeeded but no access token returned.');
         setLoading(false);
         return;
       }
 
-      let expiresIn: number | undefined = undefined;
+      let expiresIn: number | undefined;
       if (expiresAt) {
         const nowSec = Math.floor(Date.now() / 1000);
         expiresIn = Math.max(60, Number(expiresAt) - nowSec);
       }
 
-      console.log('[login] setting server session, expiresIn=', expiresIn);
-      await setServerSession(accessToken, expiresIn);
-      console.log('[login] server session set, navigating to', nextParam);
-
-      // Use a full page navigation to ensure the new HttpOnly cookie is sent to the server.
-      // router.replace may do client-side routing which can behave inconsistently with server cookies.
-      window.location.replace(nextParam);
+      try {
+        await setServerSession(accessToken, expiresIn);
+        console.log('[login] set-server-session succeeded, navigating');
+        // Use full navigation so cookie is included on first request
+        window.location.replace(nextParam);
+      } catch (err: any) {
+        // Show clear info and console output
+        console.error('[login] set-server-session failed:', err);
+        setError(`Failed to set server session: ${err?.message ?? String(err)}`);
+        // still attempt client-side navigation as fallback so user can continue (useful for debugging)
+        console.log('[login] fallback navigate to', nextParam);
+        window.location.replace(nextParam);
+      }
     } catch (err: any) {
-      console.error('[login] error', err);
+      console.error('[login] error during login flow', err);
       setError(err?.message ?? String(err));
     } finally {
       setLoading(false);
@@ -169,32 +173,17 @@ export default function LoginPage() {
 
       <div style={{ marginBottom: 12 }}>
         <label style={{ marginRight: 12 }}>
-          <input
-            type="radio"
-            name="mode"
-            checked={mode === 'auto'}
-            onChange={() => setMode('auto')}
-          />{' '}
+          <input type="radio" name="mode" checked={mode === 'auto'} onChange={() => setMode('auto')} />{' '}
           Auto
         </label>
 
         <label style={{ marginRight: 12 }}>
-          <input
-            type="radio"
-            name="mode"
-            checked={mode === 'email'}
-            onChange={() => setMode('email')}
-          />{' '}
+          <input type="radio" name="mode" checked={mode === 'email'} onChange={() => setMode('email')} />{' '}
           Email
         </label>
 
         <label>
-          <input
-            type="radio"
-            name="mode"
-            checked={mode === 'username'}
-            onChange={() => setMode('username')}
-          />{' '}
+          <input type="radio" name="mode" checked={mode === 'username'} onChange={() => setMode('username')} />{' '}
           Username
         </label>
       </div>
@@ -236,7 +225,7 @@ export default function LoginPage() {
           <button
             type="button"
             onClick={() => {
-              router.push('/forgot-password');
+              window.location.href = '/forgot-password';
             }}
             style={{ padding: '8px 14px' }}
           >
