@@ -1,7 +1,7 @@
 import React from 'react';
 import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
-import { createClient } from '@supabase/supabase-js';
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import BudgetApp from '@/components/budget/BudgetApp';
 
 export const runtime = 'nodejs';
@@ -67,7 +67,11 @@ async function extractTokenFromCookies(): Promise<string | null> {
   return null;
 }
 
-async function verifyTokenGetUser(supabaseAdmin: ReturnType<typeof createClient>, token: string | null): Promise<{ id: string } | null> {
+/**
+ * Use a generic SupabaseClient typing so the runtime client created by createClient
+ * matches the parameter type and TypeScript doesn't complain about strict generics.
+ */
+async function verifyTokenGetUser(supabaseAdmin: SupabaseClient<any, any, any>, token: string | null): Promise<{ id: string } | null> {
   if (!token) return null;
   try {
     const { data, error } = await supabaseAdmin.auth.getUser(token);
@@ -83,7 +87,7 @@ async function verifyTokenGetUser(supabaseAdmin: ReturnType<typeof createClient>
   }
 }
 
-async function fetchFirstHouseholdId(supabaseAdmin: ReturnType<typeof createClient>, userId: string): Promise<string | null> {
+async function fetchFirstHouseholdId(supabaseAdmin: SupabaseClient<any, any, any>, userId: string): Promise<string | null> {
   const { data, error } = await supabaseAdmin
     .from('household_memberships')
     .select('household_id')
@@ -98,7 +102,7 @@ async function fetchFirstHouseholdId(supabaseAdmin: ReturnType<typeof createClie
   return (data as any).household_id ?? null;
 }
 
-async function fetchBudgetsForHousehold(supabaseAdmin: ReturnType<typeof createClient>, householdId: string) {
+async function fetchBudgetsForHousehold(supabaseAdmin: SupabaseClient<any, any, any>, householdId: string) {
   const { data, error } = await supabaseAdmin
     .from('budgets')
     .select(`
