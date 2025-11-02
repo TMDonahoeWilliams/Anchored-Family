@@ -115,6 +115,7 @@ export default function LoginPage() {
 
       await setServerSession(accessToken, expiresIn);
 
+      // Replace navigation so history doesn't keep the login page
       router.replace(nextParam);
     } catch (err: any) {
       setError(err?.message ?? String(err));
@@ -194,4 +195,21 @@ export default function LoginPage() {
         {info && <div style={{ color: 'green', marginBottom: 8 }}>{info}</div>}
 
         <div style={{ display: 'flex', gap: 8 }}>
-          <
+          <button type="submit" disabled={loading} style={{ padding: '8px 14px' }}>
+            {loading ? 'Signing in…' : 'Sign in'}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              router.push('/forgot-password');
+            }}
+            style={{ padding: '8px 14px' }}
+          >
+            Forgot password
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
