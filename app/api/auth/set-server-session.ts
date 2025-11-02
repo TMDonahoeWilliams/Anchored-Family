@@ -1,57 +1,64 @@
-import type { NextApiRequest, NextApiResponse } from 'next';
+import { NextRequest, NextResponse } from 'next/server';
+
+export const runtime = 'nodejs';
 
 /**
- * Fallback API route to set an HttpOnly server cookie for the Supabase access token.
- * Accepts:
- *  - OPTIONS: reply to CORS preflight
- *  - POST: { access_token: string, expires_in?: number }
+ * App-router API route that handles:
+ *  - OPTIONS: preflight (returns 204 with CORS headers)
+ *  - POST: accepts { access_token, expires_in? } and sets sb:token HttpOnly cookie
  *
- * Make sure COOKIE_DOMAIN is set if you want the cookie available to .anchoredfamily.com.
+ * Ensure COOKIE_DOMAIN env var is set to ".anchoredfamily.com" if you want the cookie
+ * valid on both apex and www hosts. If not set, the cookie will be host-only.
  */
-export default function handler(req: NextApiRequest, res: NextApiResponse) {
-  // Allow preflight
-  if (req.method === 'OPTIONS') {
-    res.setHeader('Access-Control-Allow-Origin', req.headers.origin ?? '*');
-    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-    // If your client is same-origin you can relax CORS; respond 204 for preflight
-    return res.status(204).end();
-  }
+export async function OPTIONS(req: NextRequest) {
+  const origin = req.headers.get('origin') ?? '*';
+  const res = NextResponse.json(null, { status: 204 });
+  res.headers.set('Access-Control-Allow-Origin', origin);
+  res.headers.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.headers.set('Access-Control-Allow-Headers', 'Content-Type');
+  res.headers.set('Vary', 'Origin');
+  // If you ever fetch with credentials from a different origin, also set:
+  // res.headers.set('Access-Control-Allow-Credentials', 'true');
+  return res;
+}
 
-  if (req.method !== 'POST') {
-    res.setHeader('Allow', 'POST, OPTIONS');
-    return res.status(405).json({ error: `Method ${req.method} not allowed` });
-  }
-
+export async function POST(request: NextRequest) {
   try {
-    const { access_token, expires_in } = req.body ?? {};
-    if (!access_token || typeof access_token !== 'string') {
-      return res.status(400).json({ error: 'access_token is required' });
+    const body = await request.json().catch(() => ({}));
+    const accessToken = body?.access_token;
+    const expiresIn = Number(body?.expires_in ?? 60 * 60 * 24 * 14); // seconds default 14d
+
+    if (!accessToken || typeof accessToken !== 'string') {
+      return NextResponse.json({ error: 'access_token is required' }, { status: 400 });
     }
 
-    const cookieDomain = process.env.COOKIE_DOMAIN; // e.g. ".anchoredfamily.com"
-    const maxAge = Number(expires_in ?? 60 * 60 * 24 * 14); // seconds, default 14 days
+    const cookieDomain = process.env.COOKIE_DOMAIN || undefined; // e.g. ".anchoredfamily.com"
 
-    // Build Set-Cookie header (HttpOnly, Secure, SameSite=Lax)
-    const parts = [
-      `sb:token=${access_token}`,
-      `Path=/`,
-      `HttpOnly`,
-      `Secure`,
-      `SameSite=Lax`,
-      `Max-Age=${Math.floor(maxAge)}`,
-    ];
-    if (cookieDomain) parts.push(`Domain=${cookieDomain}`);
+    const res = NextResponse.json({ ok: true }, { status: 200 });
 
-    // Send cookie and JSON response
-    res.setHeader('Set-Cookie', parts.join('; '));
-    // Also set CORS headers to be safe for preflight/requests from a different origin
-    res.setHeader('Access-Control-Allow-Origin', req.headers.origin ?? '*');
-    res.setHeader('Vary', 'Origin');
+    // Set secure httpOnly cookie visible to server-side middleware/pages
+    res.cookies.set({
+      name: 'sb:token',
+      value: accessToken,
+      httpOnly: true,
+      secure: true,
+      sameSite: 'lax',
+      path: '/',
+      maxAge: Math.floor(expiresIn),
+      domain: cookieDomain,
+    });
 
-    return res.status(200).json({ ok: true });
+    // Add Vary/Origin headers for safety (useful if CORS ever needed)
+    const origin = request.headers.get('origin') ?? '';
+    if (origin) {
+      res.headers.set('Access-Control-Allow-Origin', origin);
+      // If you fetch with credentials across origins, enable:
+      // res.headers.set('Access-Control-Allow-Credentials', 'true');
+    }
+
+    return res;
   } catch (err: any) {
-    console.error('[pages/api/auth/set-server-session] error', err);
-    return res.status(500).json({ error: 'Internal server error' });
+    console.error('[app/api/auth/set-server-session] error', err);
+    return NextResponse.json({ error: 'internal error' }, { status: 500 });
   }
 }
