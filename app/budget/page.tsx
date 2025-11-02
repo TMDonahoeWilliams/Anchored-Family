@@ -1,137 +1,150 @@
-// app/(app)/budget/page.tsx
-import Link from "next/link";
-import { redirect } from "next/navigation";
-import { supabaseAdmin } from "@/lib/supabaseServer";
+import React from 'react';
+import { cookies } from 'next/headers';
+import { redirect } from 'next/navigation';
+import { createClient } from '@supabase/supabase-js';
+import BudgetApp from '@/components/budget/BudgetApp';
 
-const HOUSEHOLD_ID = "demo-household"; // replace with real household/tenant id from your session
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
 
-type Role = "manager" | "member";
+const SUPABASE_URL = process.env.SUPABASE_URL ?? 'https://kkhlgemlrgqgfybsrpya.supabase.co';
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
 
-async function getUserAndRole(): Promise<{ userId: string; role: Role }> {
-  const supabase = supabaseAdmin;
-
-  // 1) Require auth
-  const {
-    data: { user },
-    error: userErr,
-  } = await supabase.auth.getUser();
-
-  if (userErr || !user) {
-    redirect("/login"); // not logged in → send to login
-  }
-
-  // 2) Load role for this household
-  // Adjust table/columns to your schema.
-  // Example schema: household_members(id, household_id, user_id, role)
-  const { data: membership, error: memErr } = await supabase
-    .from("household_members")
-    .select("role")
-    .eq("household_id", HOUSEHOLD_ID)
-    .eq("user_id", user.id)
-    .maybeSingle();
-
-  if (memErr) {
-    // If there's a query error, default to member (or handle differently)
-    return { userId: user.id, role: "member" };
-  }
-
-  // If not found, treat as member
-  const role: Role = membership?.role === "manager" ? "manager" : "member";
-  return { userId: user.id, role };
+if (!SUPABASE_SERVICE_ROLE_KEY) {
+  console.error('[app/budget/page] SUPABASE_SERVICE_ROLE_KEY not configured');
 }
 
-export default async function BudgetPage() {
-  const { role } = await getUserAndRole();
-  const isManager = role === "manager";
+const COOKIE_NAMES = ['sb:token', 'sb-access-token', 'supabase-auth-token', 'supabase-auth', 'sb-session', 'session'];
 
-  const tiles = [
-    {
-      title: "Goals",
-      href: "/budget/goals",
-      description: "Create and track savings targets for your family.",
-      locked: false,
-    },
-    {
-      title: "Bank Accounts",
-      href: "/budget/accounts",
-      description: "Connect and manage bank, card, and cash accounts.",
-      locked: false,
-    },
-    {
-      title: "Budget Settings",
-      href: isManager ? "/budget/settings" : "#",
-      description: "Household-wide rules, categories, and permissions.",
-      locked: !isManager, // only managers can access
-      badge: "Manager only",
-    },
-    {
-      title: "Budgets",
-      href: "/budget/budgets",
-      description: "Plan monthly envelopes and track spending vs. plan.",
-      locked: false,
-    },
-    {
-      title: "Financial Reporting",
-      href: "/budget/reports",
-      description: "See trends, cash flow, and category breakdowns.",
-      locked: false,
-    },
-  ];
+function mask(s?: string | null) {
+  if (!s) return null;
+  if (s.length <= 8) return '******';
+  return `${s.slice(0, 4)}...${s.slice(-4)}`;
+}
+
+function extractTokenFromCookieValue(value?: string | null): string | null {
+  if (!value) return null;
+  // try parse JSON shapes first
+  try {
+    const parsed = JSON.parse(value);
+    if (parsed?.access_token) return String(parsed.access_token);
+    if (parsed?.currentSession?.access_token) return String(parsed.currentSession.access_token);
+    if (parsed?.session?.access_token) return String(parsed.session.access_token);
+    if (Array.isArray(parsed) && typeof parsed[1] === 'string') return parsed[1];
+  } catch (e) {}
+  // url-encoded JSON
+  try {
+    if (value.startsWith('%7B') || value.includes('%22access_token%22')) {
+      const decoded = decodeURIComponent(value);
+      const parsed = JSON.parse(decoded);
+      if (parsed?.access_token) return String(parsed.access_token);
+    }
+  } catch (e) {}
+  // jwt-like
+  if (value.split('.').length === 3) return value;
+  // fallback raw value
+  return value || null;
+}
+
+function extractTokenFromCookies(): string | null {
+  // First try common names
+  for (const name of COOKIE_NAMES) {
+    const c = cookies().get(name);
+    if (!c) continue;
+    const token = extractTokenFromCookieValue(c.value);
+    if (token) return token;
+  }
+  // Fallback: scan all cookies for any value that looks like a JWT or contains access_token
+  for (const c of cookies().getAll()) {
+    const maybe = extractTokenFromCookieValue(c.value);
+    if (maybe) return maybe;
+  }
+  return null;
+}
+
+async function verifyTokenGetUser(supabaseAdmin: ReturnType<typeof createClient>, token: string | null): Promise<{ id: string } | null> {
+  if (!token) return null;
+  try {
+    const { data, error } = await supabaseAdmin.auth.getUser(token);
+    if (error) {
+      console.log('[app/budget/page] supabase getUser error', error.message ?? error);
+      return null;
+    }
+    if (!data?.user) return null;
+    return { id: data.user.id };
+  } catch (err) {
+    console.error('[app/budget/page] verify token error', err);
+    return null;
+  }
+}
+
+async function fetchFirstHouseholdId(supabaseAdmin: ReturnType<typeof createClient>, userId: string): Promise<string | null> {
+  const { data, error } = await supabaseAdmin
+    .from('household_memberships')
+    .select('household_id')
+    .eq('user_id', userId)
+    .limit(1)
+    .maybeSingle();
+  if (error) {
+    console.error('[app/budget/page] fetchFirstHouseholdId error', error);
+    return null;
+  }
+  if (!data) return null;
+  return (data as any).household_id ?? null;
+}
+
+async function fetchBudgetsForHousehold(supabaseAdmin: ReturnType<typeof createClient>, householdId: string) {
+  const { data, error } = await supabaseAdmin
+    .from('budgets')
+    .select(`
+      id,
+      household_id,
+      name,
+      created_at,
+      updated_at,
+      budget_items ( id, name, amount )
+    `)
+    .eq('household_id', householdId);
+  if (error) {
+    console.error('[app/budget/page] fetchBudgetsForHousehold error:', error);
+    return [];
+  }
+  return data ?? [];
+}
+
+export default async function Page() {
+  const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } });
+
+  // extract token and log a masked preview so we can verify server sees it
+  const token = extractTokenFromCookies();
+  console.log('[app/budget/page] tokenPresent=', !!token, 'tokenPreview=', mask(token));
+
+  const user = await verifyTokenGetUser(supabaseAdmin, token);
+
+  if (!user) {
+    // Not authenticated server-side; redirect to login and preserve next
+    // encode the next param to be safe if path contains query params
+    const next = encodeURIComponent('/budget');
+    redirect(`/login?next=${next}`);
+  }
+
+  const householdId = await fetchFirstHouseholdId(supabaseAdmin, user.id);
+
+  if (!householdId) {
+    return (
+      <div style={{ padding: 24 }}>
+        <h1>Family Budget</h1>
+        <p>You don't have a household yet. Create one to start budgeting.</p>
+      </div>
+    );
+  }
+
+  const budgets = await fetchBudgetsForHousehold(supabaseAdmin, householdId);
 
   return (
-    <main className="mx-auto max-w-5xl px-4 py-10">
-      <header className="mb-8">
-        <h1 className="text-3xl font-semibold tracking-tight">Family Budget</h1>
-        <p className="text-sm text-gray-500">
-          A private dashboard for your household’s money—only you can see this.
-        </p>
-      </header>
-
-      <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {tiles.map((t) => (
-          <article
-            key={t.title}
-            className={`group relative rounded-2xl border p-5 shadow-sm transition hover:shadow ${
-              t.locked
-                ? "border-gray-200 bg-gray-50 opacity-70"
-                : "border-gray-200 bg-white"
-            }`}
-          >
-            <div className="mb-3 flex items-center justify-between">
-              <h2 className="text-lg font-medium">{t.title}</h2>
-              {t.badge ? (
-                <span className="rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-600">
-                  {t.badge}
-                </span>
-              ) : null}
-            </div>
-
-            <p className="mb-5 text-sm text-gray-600">{t.description}</p>
-
-            <div className="mt-auto">
-              {t.locked ? (
-                <button
-                  className="w-full cursor-not-allowed rounded-xl border border-gray-300 px-4 py-2 text-center text-sm text-gray-500"
-                  aria-disabled
-                  title="Only household managers can open Budget Settings"
-                >
-                  Locked
-                </button>
-              ) : (
-                <Link
-                  href={t.href}
-                  className="inline-flex w-full items-center justify-center rounded-xl border border-gray-300 px-4 py-2 text-sm font-medium hover:bg-gray-50"
-                >
-                  Open
-                </Link>
-              )}
-            </div>
-
-            {/* subtle focus ring */}
-            <span className="pointer-events-none absolute inset-0 rounded-2xl ring-0 ring-indigo-300 transition group-hover:ring-1" />
-          </article>
-        ))}
-      </section>
-    </main>
+    <div style={{ padding: 24 }}>
+      <h1>Family Budget</h1>
+      <BudgetApp initialBudgets={budgets} householdId={householdId} />
+    </div>
   );
 }
