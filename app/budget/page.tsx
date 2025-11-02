@@ -46,16 +46,21 @@ function extractTokenFromCookieValue(value?: string | null): string | null {
   return value || null;
 }
 
-function extractTokenFromCookies(): string | null {
+/**
+ * Note: cookies() may be Promise-typed in some Next.js versions/environments,
+ * so await it before using .get() or .getAll().
+ */
+async function extractTokenFromCookies(): Promise<string | null> {
+  const cookieStore = await cookies();
   // First try common names
   for (const name of COOKIE_NAMES) {
-    const c = cookies().get(name);
+    const c = cookieStore.get(name);
     if (!c) continue;
     const token = extractTokenFromCookieValue(c.value);
     if (token) return token;
   }
   // Fallback: scan all cookies for any value that looks like a JWT or contains access_token
-  for (const c of cookies().getAll()) {
+  for (const c of cookieStore.getAll()) {
     const maybe = extractTokenFromCookieValue(c.value);
     if (maybe) return maybe;
   }
@@ -116,14 +121,12 @@ export default async function Page() {
   const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } });
 
   // extract token and log a masked preview so we can verify server sees it
-  const token = extractTokenFromCookies();
+  const token = await extractTokenFromCookies();
   console.log('[app/budget/page] tokenPresent=', !!token, 'tokenPreview=', mask(token));
 
   const user = await verifyTokenGetUser(supabaseAdmin, token);
 
   if (!user) {
-    // Not authenticated server-side; redirect to login and preserve next
-    // encode the next param to be safe if path contains query params
     const next = encodeURIComponent('/budget');
     redirect(`/login?next=${next}`);
   }
