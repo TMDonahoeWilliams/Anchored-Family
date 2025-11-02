@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getStripeInstance } from '@/lib/stripe';
 
-// Ensure Node runtime if you rely on Stripe Node SDK
+// Ensure Node runtime if you rely on the Stripe Node SDK
 export const runtime = 'nodejs';
 
 function corsHeaders(origin?: string) {
@@ -83,7 +83,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: msg }, { status: 400, headers: corsHeaders() });
     }
 
-    // Extra debug: log the finalPriceId (DO NOT log secret keys)
+    // Log the final price for diagnostics
     console.log('[/api/billing/checkout] finalPriceId:', finalPriceId);
 
     // Validate recurring (subscriptions require recurring prices)
@@ -107,20 +107,36 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Server configuration error' }, { status: 500, headers: corsHeaders() });
     }
 
-    const successUrl = `${origin}${successPath ?? '/account/settings/subscription/success'}`;
-    const cancelUrl = `${origin}${cancelPath ?? '/account/settings/subscription?canceled=true'}`;
+    // ===== Properly construct success/cancel URLs =====
+    // Use the URL constructor so adding session_id always uses the right separator.
+    // successPath/cancelPath may already include query params (e.g. "/dashboard?welcome=1")
+    const makeRedirectUrl = (path?: string, paramKey = 'session_id') => {
+      // If path is falsy, use a sensible default path
+      const pathOrDefault = path ?? '/account/settings/subscription/success';
+      // Build absolute URL using origin as base
+      const urlObj = new URL(pathOrDefault, origin);
+      // Set the placeholder param (Stripe replaces {CHECKOUT_SESSION_ID} on redirect)
+      urlObj.searchParams.set(paramKey, '{CHECKOUT_SESSION_ID}');
+      return urlObj.toString();
+    };
+
+    const success_url = makeRedirectUrl(successPath ?? '/account/settings/subscription/success');
+    const cancel_url = makeRedirectUrl(cancelPath ?? '/account/settings/subscription?canceled=true', /*paramKey*/ 'canceled'); // we won't set session_id on cancel
+
+    // If you prefer cancel to not include session param, construct differently:
+    // const cancelUrlObj = new URL(cancelPath ?? '/account/settings/subscription?canceled=true', origin);
+    // const cancel_url = cancelUrlObj.toString();
 
     const idempotencyKey = request.headers.get('x-idempotency-key') || `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 
-    // Important: ensure we pass `price` (not price_id/priceId) and that finalPriceId exists.
-    // Stripe expects line_items: [{ price: 'price_xxx', quantity: 1 }] when using Price objects.
+    // Create session
     const session = await stripe.checkout.sessions.create(
       {
         payment_method_types: ['card'],
         mode: 'subscription',
         line_items: [{ price: finalPriceId, quantity: 1 }],
-        success_url: `${successUrl}?session_id={CHECKOUT_SESSION_ID}`,
-        cancel_url: cancelUrl,
+        success_url,
+        cancel_url,
         automatic_tax: { enabled: true },
         billing_address_collection: 'required',
         metadata: { source: 'anchored_family_app', orgId, userId },
