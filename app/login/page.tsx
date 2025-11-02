@@ -1,14 +1,12 @@
 'use client';
 import React, { useState } from 'react';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL ?? '';
 const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? '';
 
 if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
-  // In dev this helps surface a missing env var quickly (don't log secrets in prod)
-  // eslint-disable-next-line no-console
   console.warn('Missing NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY env vars.');
 }
 
@@ -16,6 +14,10 @@ const supabaseClient: SupabaseClient = createClient(SUPABASE_URL, SUPABASE_ANON_
 
 export default function LoginPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  // <-- default changed from '/dashboard' to '/home'
+  const nextParam = searchParams?.get('next') ?? '/home';
+
   const [identifier, setIdentifier] = useState(''); // email or username
   const [password, setPassword] = useState('');
   const [mode, setMode] = useState<'email' | 'username' | 'auto'>('auto');
@@ -24,9 +26,7 @@ export default function LoginPage() {
   const [info, setInfo] = useState<string | null>(null);
 
   async function resolveEmailIfNeeded(id: string) {
-    // If user selected "email" mode or id contains @ treat it as email
     if (mode === 'email' || id.includes('@')) return id;
-    // If user selected "username" or auto-detected username, call server to map username -> email
     try {
       const res = await fetch('/api/auth/username-to-email', {
         method: 'POST',
@@ -45,6 +45,19 @@ export default function LoginPage() {
     }
   }
 
+  async function setServerSession(accessToken: string, expiresIn?: number) {
+    const res = await fetch('/api/auth/set-server-session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ access_token: accessToken, expires_in: expiresIn }),
+    });
+    if (!res.ok) {
+      const json = await res.json().catch(() => ({}));
+      throw new Error(json?.error || `Failed to set server session (${res.status})`);
+    }
+    return true;
+  }
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
@@ -55,43 +68,53 @@ export default function LoginPage() {
       const trimmed = identifier.trim();
       if (!trimmed || !password) {
         setError('Please enter your email/username and password.');
+        setLoading(false);
         return;
       }
 
-      // determine whether to treat identifier as email or username
       let email: string;
       if (mode === 'email' || trimmed.includes('@')) {
         email = trimmed;
       } else if (mode === 'username') {
         email = await resolveEmailIfNeeded(trimmed);
       } else {
-        // auto mode: if identifier looks like an email use it, otherwise try username->email
         if (trimmed.includes('@')) {
           email = trimmed;
         } else {
-          // attempt to resolve; if fails, show error from resolver
           email = await resolveEmailIfNeeded(trimmed);
         }
       }
 
-      // sign in using Supabase client (client-side)
-      const { error: signInError } = await supabaseClient.auth.signInWithPassword({
+      const { data, error: signInError } = await supabaseClient.auth.signInWithPassword({
         email,
         password,
       });
 
       if (signInError) {
         setError(signInError.message ?? 'Sign in failed');
+        setLoading(false);
         return;
       }
 
-      // Successful sign-in — redirect to intended page or dashboard
-      setInfo('Signed in successfully. Redirecting…');
-      // small delay to allow UI update
-      setTimeout(() => {
-        // If you use a next query param, handle it here (e.g. /login?next=...)
-        router.push('/dashboard');
-      }, 350);
+      const accessToken = data?.session?.access_token ?? null;
+      const expiresAt = data?.session?.expires_at ?? null;
+
+      if (!accessToken) {
+        setError('Sign in succeeded but no access token available for server session.');
+        setLoading(false);
+        return;
+      }
+
+      let expiresIn: number | undefined = undefined;
+      if (expiresAt) {
+        const nowSec = Math.floor(Date.now() / 1000);
+        expiresIn = Math.max(60, Number(expiresAt) - nowSec);
+      }
+
+      await setServerSession(accessToken, expiresIn);
+
+      // redirect to /home (nextParam default is /home)
+      router.replace(nextParam);
     } catch (err: any) {
       setError(err?.message ?? String(err));
     } finally {
@@ -177,7 +200,6 @@ export default function LoginPage() {
           <button
             type="button"
             onClick={() => {
-              // fallback to password reset flow if desired
               router.push('/forgot-password');
             }}
             style={{ padding: '8px 14px' }}
