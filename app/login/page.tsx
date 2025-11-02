@@ -15,16 +15,34 @@ if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
 
 const supabaseClient: SupabaseClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
+function sanitizeNext(next: string | null | undefined): string {
+  if (!next) return '/home';
+  try {
+    // Prevent open-redirects: only allow internal paths starting with '/'
+    const url = new URL(next, 'https://example.com'); // base to parse relative urls
+    const path = url.pathname + (url.search || '') + (url.hash || '');
+    // If path is empty or not starting with '/', fallback
+    if (!path || !path.startsWith('/')) return '/home';
+    return path;
+  } catch (e) {
+    // If parsing fails, fallback to '/home'
+    return '/home';
+  }
+}
+
 export default function LoginPage() {
   const router = useRouter();
   const [nextParam, setNextParam] = useState('/home');
 
-  // Obtain next redirect param from location.search on the client
+  // Read next redirect param on client and sanitize
   useEffect(() => {
     try {
       const params = new URLSearchParams(window.location.search);
-      const next = params.get('next') ?? params.get('redirect') ?? '/home';
-      setNextParam(next);
+      // Common keys: next, redirect, returnTo
+      const rawNext = params.get('next') ?? params.get('redirect') ?? params.get('returnTo') ?? '/home';
+      const safe = sanitizeNext(rawNext);
+      setNextParam(safe);
+      console.log('[login] detected next param=', rawNext, 'sanitized=', safe);
     } catch (e) {
       setNextParam('/home');
     }
@@ -57,9 +75,11 @@ export default function LoginPage() {
     }
   }
 
+  // Send access token to server route to set HttpOnly cookie for SSR pages
   async function setServerSession(accessToken: string, expiresIn?: number) {
     const res = await fetch('/api/auth/set-server-session', {
       method: 'POST',
+      credentials: 'same-origin', // ensure browser accepts cookies for same-origin
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ access_token: accessToken, expires_in: expiresIn }),
     });
@@ -123,11 +143,15 @@ export default function LoginPage() {
         expiresIn = Math.max(60, Number(expiresAt) - nowSec);
       }
 
+      console.log('[login] setting server session, expiresIn=', expiresIn);
       await setServerSession(accessToken, expiresIn);
+      console.log('[login] server session set, navigating to', nextParam);
 
-      // Replace navigation so history doesn't keep the login page
-      router.replace(nextParam);
+      // Use a full page navigation to ensure the new HttpOnly cookie is sent to the server.
+      // router.replace may do client-side routing which can behave inconsistently with server cookies.
+      window.location.replace(nextParam);
     } catch (err: any) {
+      console.error('[login] error', err);
       setError(err?.message ?? String(err));
     } finally {
       setLoading(false);
