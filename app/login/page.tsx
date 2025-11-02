@@ -7,8 +7,8 @@ const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL ?? '';
 const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? '';
 
 if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
-  // In dev this helps surface a missing env var quickly
-  // (don't show secrets in production logs)
+  // In dev this helps surface a missing env var quickly (don't log secrets in prod)
+  // eslint-disable-next-line no-console
   console.warn('Missing NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY env vars.');
 }
 
@@ -40,7 +40,7 @@ export default function LoginPage() {
       const json = await res.json();
       if (!json?.email) throw new Error('No email found for that username');
       return json.email as string;
-    } catch (err: any) {
+    } catch (err) {
       throw err;
     }
   }
@@ -75,26 +75,23 @@ export default function LoginPage() {
       }
 
       // sign in using Supabase client (client-side)
-      const { error: signInError, data } = await supabaseClient.auth.signInWithPassword({
+      const { error: signInError } = await supabaseClient.auth.signInWithPassword({
         email,
         password,
       });
 
       if (signInError) {
-        // Supabase may return human-friendly message in message property
         setError(signInError.message ?? 'Sign in failed');
         return;
       }
 
       // Successful sign-in — redirect to intended page or dashboard
-      // If you use next-auth or other flow, adjust accordingly.
       setInfo('Signed in successfully. Redirecting…');
       // small delay to allow UI update
       setTimeout(() => {
-        // If your login flow relies on a next query param, handle it here (e.g. /login?next=...)
-        // For this example, redirect to dashboard
+        // If you use a next query param, handle it here (e.g. /login?next=...)
         router.push('/dashboard');
-      }, 400);
+      }, 350);
     } catch (err: any) {
       setError(err?.message ?? String(err));
     } finally {
@@ -117,4 +114,78 @@ export default function LoginPage() {
             type="radio"
             name="mode"
             checked={mode === 'auto'}
+            onChange={() => setMode('auto')}
+          />{' '}
+          Auto
+        </label>
 
+        <label style={{ marginRight: 12 }}>
+          <input
+            type="radio"
+            name="mode"
+            checked={mode === 'email'}
+            onChange={() => setMode('email')}
+          />{' '}
+          Email
+        </label>
+
+        <label>
+          <input
+            type="radio"
+            name="mode"
+            checked={mode === 'username'}
+            onChange={() => setMode('username')}
+          />{' '}
+          Username
+        </label>
+      </div>
+
+      <form onSubmit={handleSubmit}>
+        <div style={{ marginBottom: 10 }}>
+          <label style={{ display: 'block', marginBottom: 6 }}>Email or username</label>
+          <input
+            aria-label="Email or username"
+            value={identifier}
+            onChange={(e) => setIdentifier(e.target.value)}
+            placeholder={mode === 'username' ? 'username' : 'you@example.com'}
+            style={{ width: '100%', padding: '8px 10px', fontSize: 16 }}
+            autoComplete="username"
+          />
+        </div>
+
+        <div style={{ marginBottom: 10 }}>
+          <label style={{ display: 'block', marginBottom: 6 }}>Password</label>
+          <input
+            aria-label="Password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            type="password"
+            placeholder="Your password"
+            style={{ width: '100%', padding: '8px 10px', fontSize: 16 }}
+            autoComplete="current-password"
+          />
+        </div>
+
+        {error && <div style={{ color: 'red', marginBottom: 8 }}>{error}</div>}
+        {info && <div style={{ color: 'green', marginBottom: 8 }}>{info}</div>}
+
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button type="submit" disabled={loading} style={{ padding: '8px 14px' }}>
+            {loading ? 'Signing in…' : 'Sign in'}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              // fallback to password reset flow if desired
+              router.push('/forgot-password');
+            }}
+            style={{ padding: '8px 14px' }}
+          >
+            Forgot password
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
