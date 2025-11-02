@@ -1,7 +1,7 @@
 'use client';
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { useRouter } from 'next/navigation';
 
 export const dynamic = 'force-dynamic';
 
@@ -17,8 +17,18 @@ const supabaseClient: SupabaseClient = createClient(SUPABASE_URL, SUPABASE_ANON_
 
 export default function LoginPage() {
   const router = useRouter();
-  const searchParams = useSearchParams();
-  const nextParam = searchParams?.get('next') ?? '/home';
+  const [nextParam, setNextParam] = useState('/home');
+
+  // Obtain next redirect param from location.search on the client
+  useEffect(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const next = params.get('next') ?? params.get('redirect') ?? '/home';
+      setNextParam(next);
+    } catch (e) {
+      setNextParam('/home');
+    }
+  }, []);
 
   const [identifier, setIdentifier] = useState(''); // email or username
   const [password, setPassword] = useState('');
