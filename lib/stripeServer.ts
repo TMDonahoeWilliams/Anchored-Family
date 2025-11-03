@@ -2,9 +2,8 @@ import Stripe from 'stripe';
 
 /**
  * Server-only helper to create a Stripe client.
- * Keep this file server-only (do not import from client-side code).
+ * Do NOT import this module from client-side code.
  */
-
 export function getStripeInstance(): Stripe | null {
   const key = process.env.STRIPE_SECRET_KEY ?? process.env.STRIPE_SECRET;
   if (!key) {
@@ -13,8 +12,7 @@ export function getStripeInstance(): Stripe | null {
   }
 
   try {
-    // Do not force a hard-coded apiVersion here to avoid TS literal-type mismatches
-    // with the Stripe typings used in different SDK releases.
+    // Construct Stripe client without forcing a hard-coded apiVersion to avoid TS literal mismatch issues.
     return new Stripe(key);
   } catch (err) {
     console.error('[stripeServer] failed to create Stripe client', err);
