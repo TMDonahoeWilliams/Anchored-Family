@@ -5,7 +5,7 @@ import { SUBSCRIPTION_PLANS, formatPrice } from '@/lib/stripe';
 
 export default function SubscriptionPage() {
   const [isLoading, setIsLoading] = useState(false);
-  const [selectedPlan, setSelectedPlan] = useState<'BASIC' | 'PREMIUM' | null>(null);
+  const [selectedPlan, setSelectedPlan] = useState<'BASIC' | 'PLUS' | 'PREMIUM' | null>(null);
   const [canceled, setCanceled] = useState(false);
 
   useEffect(() => {
@@ -16,7 +16,7 @@ export default function SubscriptionPage() {
     }
   }, []);
 
-  const handleSubscribe = async (planKey: 'BASIC' | 'PREMIUM') => {
+  const handleSubscribe = async (planKey: 'BASIC' | 'PLUS' | 'PREMIUM') => {
     setIsLoading(true);
     setSelectedPlan(planKey);
 
@@ -59,33 +59,33 @@ export default function SubscriptionPage() {
           Select the perfect plan for your family's needs
         </div>
 
-        <div className="categories">
+        <div className="categories" style={{ display: 'grid', gap: '1rem', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))' }}>
           {Object.entries(SUBSCRIPTION_PLANS).map(([key, plan]) => (
-            <div key={key} className="category-card" style={{ position: 'relative' }}>
+            <div key={key} className="category-card" style={{ position: 'relative', padding: '1rem', borderRadius: 8, border: '1px solid rgba(0,0,0,0.06)' }}>
               {key === 'PREMIUM' && (
-                <div 
-                  style={{ 
-                    position: 'absolute', 
-                    top: '-8px', 
-                    right: '8px', 
-                    backgroundColor: '#3b82f6', 
-                    color: 'white', 
-                    padding: '2px 8px', 
-                    borderRadius: '12px', 
+                <div
+                  style={{
+                    position: 'absolute',
+                    top: '-8px',
+                    right: '8px',
+                    backgroundColor: '#3b82f6',
+                    color: 'white',
+                    padding: '2px 8px',
+                    borderRadius: '12px',
                     fontSize: '0.75rem',
-                    fontWeight: '500'
+                    fontWeight: '500',
                   }}
                 >
                   Popular
                 </div>
               )}
-              
+
               <div style={{ width: '100%' }}>
                 <div className="section-title" style={{ marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                   <span style={{ fontSize: '1.2rem' }}>⚡</span>
                   {plan.name}
                 </div>
-                
+
                 <div style={{ marginBottom: '0.75rem' }}>
                   <span style={{ fontSize: '1.5rem', fontWeight: 'bold', color: '#1f2937' }}>
                     {formatPrice(plan.price)}
@@ -93,29 +93,32 @@ export default function SubscriptionPage() {
                   <span className="subtitle">/{plan.interval}</span>
                 </div>
 
-                <div className="subtitle" style={{ marginBottom: '1rem', fontSize: '0.875rem', lineHeight: '1.4' }}>
-                  {key === 'BASIC' 
-                    ? "Essential family tools: meal planning, recipes, calendar, and shopping lists"
-                    : "Complete family suite: all Basic features plus devotions, budget tracking, and priority support"
-                  }
+                <div className="subtitle" style={{ marginBottom: '1rem', fontSize: '0. nine rem', lineHeight: '1.4' }}>
+                  {key === 'BASIC'
+                    ? 'Essential family tools: meal planning, recipes, calendar, and shopping lists'
+                    : key === 'PLUS'
+                    ? 'Everything in Basic plus budgeting features, shared roles, and advanced planner tools'
+                    : 'Complete family suite: all Plus features plus devotions, vault, advanced sharing, and priority support'}
                 </div>
 
                 <button
-                  onClick={() => handleSubscribe(key as 'BASIC' | 'PREMIUM')}
+                  onClick={() => handleSubscribe(key as 'BASIC' | 'PLUS' | 'PREMIUM')}
                   disabled={isLoading && selectedPlan === key}
-                  className={`btn ${key === 'PREMIUM' ? 'accent-blue' : 'accent-violet'} btn--sm`}
+                  className={`btn ${key === 'PREMIUM' ? 'accent-blue' : key === 'PLUS' ? 'accent-green' : 'accent-violet'} btn--sm`}
                   style={{ width: '100%' }}
                 >
                   {isLoading && selectedPlan === key ? (
                     <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem' }}>
-                      <div style={{ 
-                        width: '16px', 
-                        height: '16px', 
-                        border: '2px solid transparent', 
-                        borderTop: '2px solid currentColor', 
-                        borderRadius: '50%', 
-                        animation: 'spin 1s linear infinite' 
-                      }}></div>
+                      <div
+                        style={{
+                          width: '16px',
+                          height: '16px',
+                          border: '2px solid transparent',
+                          borderTop: '2px solid currentColor',
+                          borderRadius: '50%',
+                          animation: 'spin 1s linear infinite',
+                        }}
+                      ></div>
                       Processing...
                     </span>
                   ) : (
@@ -138,13 +141,21 @@ export default function SubscriptionPage() {
           <div style={{ fontSize: '0.875rem', color: '#6b7280', padding: '0 1rem', marginBottom: '1rem' }}>
             • Meal planning tools • Recipe collection • Family calendar • Shopping lists
           </div>
-          
+
+          <div className="btn btn--sm" style={{ justifyContent: 'space-between', pointerEvents: 'none' }}>
+            <span><strong>Plus Plan</strong> - Advanced Family Tools</span>
+            <span className="subtitle">{formatPrice(SUBSCRIPTION_PLANS.PLUS.price)}/month</span>
+          </div>
+          <div style={{ fontSize: '0.875rem', color: '#6b7280', padding: '0 1rem', marginBottom: '1rem' }}>
+            • Everything in Basic • Budget tracking • Shared roles & advanced planner features
+          </div>
+
           <div className="btn btn--sm" style={{ justifyContent: 'space-between', pointerEvents: 'none' }}>
             <span><strong>Premium Plan</strong> - Complete Family Suite</span>
             <span className="subtitle">{formatPrice(SUBSCRIPTION_PLANS.PREMIUM.price)}/month</span>
           </div>
           <div style={{ fontSize: '0.875rem', color: '#6b7280', padding: '0 1rem' }}>
-            • All Basic features • Advanced meal planning • Unlimited recipes • Family devotions library • Budget tracking • Priority support
+            • All Plus features • Unlimited households • Vault & Devotion Pro • Priority support
           </div>
         </div>
       </section>
