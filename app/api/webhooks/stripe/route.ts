@@ -3,22 +3,30 @@ import { getStripeInstance } from '@/lib/stripeServer';
 
 export const runtime = 'nodejs';
 
-// CORS helper
 function corsHeaders(origin?: string | null) {
-  return {
-    'Access-Control-Allow-Origin': origin ?? '*',
-    'Access-Control-Allow-Methods': 'POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
-  };
+  const h = new Headers();
+  h.set('Access-Control-Allow-Origin', origin ?? '*');
+  h.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  h.set('Access-Control-Allow-Headers', 'Content-Type');
+  return h;
+}
+
+function mask(s: string | null | undefined, showStart = 8, showEnd = 8) {
+  if (!s) return '';
+  if (s.length <= showStart + showEnd + 3) return '***';
+  return `${s.slice(0, showStart)}...${s.slice(-showEnd)}`;
 }
 
 export async function OPTIONS(req: NextRequest) {
-  return new NextResponse(null, { status: 204, headers: corsHeaders(req.headers.get('origin') || undefined) });
+  return new NextResponse(null, {
+    status: 204,
+    headers: Object.fromEntries(corsHeaders(req.headers.get('origin') || undefined).entries()),
+  });
 }
 
 export async function POST(req: NextRequest) {
   const origin = req.headers.get('origin') ?? undefined;
-  const headers = corsHeaders(origin);
+  const headers = Object.fromEntries(corsHeaders(origin).entries());
 
   const stripe = getStripeInstance();
   if (!stripe) {
@@ -26,57 +34,56 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Stripe not configured' }, { status: 500, headers });
   }
 
-  const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || '';
+  const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
   if (!STRIPE_WEBHOOK_SECRET) {
-    console.error('[webhook] STRIPE_WEBHOOK_SECRET is not set');
+    console.error('[webhook] STRIPE_WEBHOOK_SECRET not set');
     return NextResponse.json({ error: 'Webhook secret not configured' }, { status: 500, headers });
   }
 
-  // IMPORTANT: read raw body as text (do NOT parse JSON before verification)
+  // IMPORTANT: read raw body (do not parse JSON before verification)
   const payload = await req.text();
+  // read stripe-signature header case-insensitively
   const sig = req.headers.get('stripe-signature') || req.headers.get('Stripe-Signature');
 
-  console.log('[webhook] incoming webhook — payload length:', payload.length, 'signature present:', !!sig);
+  console.log('[webhook] incoming request — payloadLength=', payload.length, ' signaturePresent=', !!sig);
 
   if (!sig) {
+    console.warn('[webhook] stripe-signature header missing');
     return NextResponse.json({ error: 'Missing stripe-signature header' }, { status: 400, headers });
   }
+
+  // Masked logging: don't log full secret or signature
+  console.log('[webhook] signature header preview:', mask(sig));
 
   let event;
   try {
     event = stripe.webhooks.constructEvent(payload, sig, STRIPE_WEBHOOK_SECRET);
   } catch (err: any) {
+    // Common Stripe SDK messages: "No signatures found matching...", "Unable to extract signature from header", etc.
     console.error('[webhook] signature verification failed:', err?.message ?? err);
-    return NextResponse.json({ error: `Webhook signature verification failed: ${err?.message ?? err}` }, { status: 400, headers });
+    // Optionally log a small payload preview for debugging (not full body)
+    console.error('[webhook] payload preview:', payload.slice(0, 1000));
+    return NextResponse.json({ error: `Webhook signature verification failed: ${err?.message ?? String(err)}` }, { status: 400, headers });
   }
 
+  // Verified: handle events
   try {
-    console.log('[webhook] verified event:', event.type);
+    console.log('[webhook] verified event type=', event.type);
 
-    // Handle required events — extend with your DB upsert logic
-    switch (event.type) {
-      case 'checkout.session.completed': {
-        const session = event.data.object as any;
-        console.log('[webhook] checkout.session.completed id=', session.id, 'customer=', session.customer);
-        // TODO: upsert customer/subscription mapping in DB using session.metadata or client_reference_id
-        break;
-      }
-      case 'invoice.payment_succeeded':
-      case 'invoice.payment_failed':
-      case 'customer.subscription.created':
-      case 'customer.subscription.updated':
-      case 'customer.subscription.deleted': {
-        console.log('[webhook] subscription lifecycle event:', event.type);
-        // TODO: upsert subscription row in your subscriptions table
-        break;
-      }
-      default:
-        console.log('[webhook] unhandled event type:', event.type);
-    }
+    // Example handling — adapt to your schema and mapping logic:
+    // - For checkout.session.completed: retrieve session, get subscription id, customer, metadata (user_id)
+    // - For customer.subscription.* or invoice.*: upsert subscription row
+    //
+    // PSEUDO:
+    // switch (event.type) {
+    //   case 'checkout.session.completed': { ... upsert subscription ...; break; }
+    //   case 'customer.subscription.updated': { ... upsert subscription ...; break; }
+    //   ...
+    // }
 
     return NextResponse.json({ received: true }, { status: 200, headers });
   } catch (err: any) {
-    console.error('[webhook] error handling event:', err);
+    console.error('[webhook] error processing event:', err);
     return NextResponse.json({ error: 'Failed handling webhook' }, { status: 500, headers });
   }
 }
