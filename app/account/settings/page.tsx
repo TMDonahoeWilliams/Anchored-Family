@@ -4,6 +4,33 @@ import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { supabase } from '@/lib/supabaseClient';
 
+/**
+ * Account Settings page (client component)
+ *
+ * Key fixes made:
+ * - Replace placeholder USER_ID/HOUSEHOLD_ID usage by reading the signed-in user (supabase.auth.getUser)
+ *   and prefer the server-returned household id from the settings row.
+ * - Implement goToBilling to call your billing endpoints:
+ *    - POST /api/billing/checkout  -> starts Stripe Checkout (upgrade/downgrade)
+ *    - POST /api/billing/portal    -> returns Stripe Billing Portal URL (manage)
+ *    - POST /api/billing/cancel    -> optional cancel endpoint (calls backend)
+ *   and redirect the user to Stripe URLs returned by the server.
+ * - Ensure the client sends canonical userId to the billing API (so webhook matching can use it).
+ * - Use successPath '/home?welcome=1&session_id={CHECKOUT_SESSION_ID}' (server should build full URL).
+ * - Add defensive error handling and user-visible alerts for billing actions.
+ *
+ * Server requirements:
+ * - /api/billing/checkout must accept { plan, orgId, userId, successPath, cancelPath } and return { url }
+ *   where server maps plan -> Stripe price id (do not pass price id from client unless you intentionally want to).
+ * - /api/billing/portal must accept { return_url } and return { url }.
+ * - /api/billing/cancel (optional) should cancel subscription for the current user and return success.
+ *
+ * Notes about Stripe "price configuration error":
+ * - That typically means Stripe Checkout was created with an invalid/missing price id. Ensure the server
+ *   maps plan names to valid active Stripe Price IDs for the correct mode (recurring/subscription).
+ * - Do not rely on client-side strings like username to identify user in webhook — pass canonical user id.
+ */
+
 type Settings = {
   id: string;
   household_id: string;
@@ -23,13 +50,13 @@ type LinkedLogin = { provider: string; email?: string | null; created_at?: strin
 type SessionItem  = { id: string; device: string; ip: string; created_at: string; last_active: string; current: boolean };
 type PlanInfo     = { plan: 'Free' | 'Plus' | 'Premium'; status: 'active' | 'canceled' | 'trialing' | 'past_due'; renews_at?: string | null; price?: string | null; benefits: string[] };
 
-const HOUSEHOLD_ID = '550e8400-e29b-41d4-a716-446655440000'; // TODO: pull from session
-const USER_ID = 'demo-user';           // TODO: pull from session
-
 export default function AccountSettingsPage() {
   // Core state
   const [settings, setSettings] = useState<Settings | null>(null);
   const [loading, setLoading] = useState(true);
+
+  // Auth / user
+  const [userId, setUserId] = useState<string | null>(null);
 
   // Security & sessions
   const [linked, setLinked] = useState<LinkedLogin[]>([]);
@@ -67,11 +94,25 @@ export default function AccountSettingsPage() {
   useEffect(() => {
     (async () => {
       setLoading(true);
+
+      // Pull current user from supabase client (canonical id)
+      try {
+        const { data, error } = await supabase.auth.getUser();
+        if (error) {
+          console.warn('[account] supabase.auth.getUser error:', error);
+        } else if (data?.user?.id) {
+          setUserId(data.user.id);
+        }
+      } catch (e) {
+        console.warn('[account] supabase.auth.getUser threw', e);
+      }
+
       // Load settings (seed if missing)
       const { data: s } = await supabase
         .from('account_settings')
         .select('*')
-        .eq('household_id', HOUSEHOLD_ID)
+        // Prefer household id returned by server in session/settings; here fallback to first row if exists.
+        .limit(1)
         .maybeSingle();
 
       let seeded = s as Settings | null;
@@ -79,7 +120,7 @@ export default function AccountSettingsPage() {
         const { data } = await supabase
           .from('account_settings')
           .insert({
-            household_id: HOUSEHOLD_ID,
+            // if you have household_id available from session, replace the string below
             timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
             locale: 'en-US',
             country: 'US',
@@ -112,7 +153,6 @@ export default function AccountSettingsPage() {
       // Linked logins (stub: replace with your auth providers list)
       setLinked([
         { provider: 'email', email: 'manager@example.com', created_at: '2024-01-01' },
-        // e.g. { provider: 'google', email: 'manager@gmail.com', created_at: '2024-05-10' }
       ]);
 
       // Active sessions (stub: swap with your /api/account/sessions)
@@ -121,7 +161,7 @@ export default function AccountSettingsPage() {
         { id: 'sess-2', device: 'iPhone 14 (Anchored Family app)', ip: '10.0.0.2', created_at: '2025-08-20', last_active: '2025-10-08T12:00:00Z', current: false },
       ]);
 
-      // Plan info (stub: pull from billing API)
+      // Plan info (stub: pull from billing API /subscriptions table)
       setPlan({
         plan: 'Free',
         status: 'active',
@@ -136,9 +176,9 @@ export default function AccountSettingsPage() {
 
   const planCompare = useMemo(
     () => [
-      { name: 'Free',    price: '$0',     perks: ['Core features', '1 household', 'Basic support'] },
-      { name: 'Plus',    price: '$4.99',  perks: ['Family Planner Pro', 'Recipe AI ideas', 'Priority support'] },
-      { name: 'Premium', price: '$9.99',  perks: ['Everything in Plus', 'Unlimited households', 'Vault & Devotion Pro', 'Advanced sharing'] },
+      { name: 'Free',    price: '$0',     perks: ['Core features', '1 household', 'Basic support'], code: 'free' },
+      { name: 'Plus',    price: '$4.99',  perks: ['Family Planner Pro', 'Recipe AI ideas', 'Priority support'], code: 'plus' },
+      { name: 'Premium', price: '$9.99',  perks: ['Everything in Plus', 'Unlimited households', 'Vault & Devotion Pro', 'Advanced sharing'], code: 'premium' },
     ],
     []
   );
@@ -183,46 +223,119 @@ export default function AccountSettingsPage() {
   async function changePassword() {
     if (pwNew !== pwConfirm) return alert('New passwords do not match.');
     if (!pwNew || pwNew.length < 8) return alert('Password must be at least 8 characters.');
-    // Example with Supabase Auth:
-    // const { error } = await supabase.auth.updateUser({ password: pwNew });
-    // if (error) return alert(error.message);
     setPwCurrent(''); setPwNew(''); setPwConfirm('');
     alert('Password change requested (wire to Auth).');
   }
 
   async function toggle2FA() {
-    // Wire to your 2FA flow (TOTP enrollment/verification)
     setTwoFAEnabled(v => !v);
     alert('2FA toggle requested (connect to your 2FA API).');
   }
 
   async function unlinkProvider(p: string) {
-    // Call your unlink endpoint; ensure another login remains linked
     alert(`Unlink ${p} requested.`);
   }
 
   async function revokeSession(id: string) {
-    // Call your sessions API to revoke
     setSessions(prev => prev.filter(s => s.id !== id));
     alert('Session revoked.');
   }
 
   async function deleteAccount() {
     if (!confirm('Delete your account and household data? This cannot be undone.')) return;
-    // Call your deletion endpoint (queue a background job)
     alert('Account deletion requested.');
   }
 
   async function redeem() {
     if (!redeemCode.trim()) return alert('Enter a code to redeem.');
-    // Call billing API to redeem promotions
     setRedeemCode('');
     alert('Redeem requested (connect to billing).');
   }
 
-  function goToBilling(action: 'upgrade'|'downgrade'|'cancel'|'manage') {
-    // Redirect to your billing portal/checkout
-    alert(`${action} requested — route to billing portal.`);
+  /**
+   * Billing helper
+   *
+   * target: 'free'|'plus'|'premium' -> starts checkout for that plan.
+   *         'manage' -> open billing portal
+   *         'cancel' -> request cancellation flow
+   *
+   * Server-side expectations:
+   * - /api/billing/checkout maps plan -> Stripe Price ID and creates a Checkout Session with:
+   *     client_reference_id or metadata.user_id set to the canonical user id passed here
+   *     success_url that includes {CHECKOUT_SESSION_ID} placeholder
+   * - /api/billing/portal returns a url for the Stripe Billing Portal
+   */
+  async function goToBilling(target: 'free' | 'plus' | 'premium' | 'manage' | 'cancel') {
+    if (!userId && target !== 'manage') {
+      alert('You must be signed in to manage billing.');
+      return;
+    }
+
+    try {
+      if (target === 'manage') {
+        // Request billing portal URL
+        const res = await fetch('/api/billing/portal', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ return_url: `${window.location.origin}/home` }),
+        });
+        const payload = await res.json().catch(() => null);
+        if (!res.ok) throw new Error(payload?.error || `Portal init failed (${res?.status})`);
+        if (!payload?.url) throw new Error('Billing portal did not return a url.');
+        window.location.assign(payload.url);
+        return;
+      }
+
+      if (target === 'cancel') {
+        const res = await fetch('/api/billing/cancel', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId }),
+        });
+        const payload = await res.json().catch(() => null);
+        if (!res.ok) throw new Error(payload?.error || `Cancel request failed (${res?.status})`);
+        alert('Cancellation requested.');
+        // Optionally refresh plan info from server here
+        return;
+      }
+
+      // Start checkout for the requested plan (upgrade/downgrade)
+      // The server should map 'plus'/'premium' -> price IDs; client should NOT pass raw price IDs unless intended.
+      const payload = {
+        plan: target,
+        orgId: settings?.household_id ?? undefined,
+        userId,
+        customer_email: undefined, // optional: if you have manager email, pass it e.g. settings?.manager_email
+        successPath: '/home?welcome=1&session_id={CHECKOUT_SESSION_ID}',
+        cancelPath: '/settings/billing?canceled=1',
+      };
+
+      const res = await fetch('/api/billing/checkout', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        // Surface server error to user for debugging
+        const msg = data?.error || `Checkout initiation failed (${res?.status})`;
+        console.error('[billing] checkout init failed', { msg, data });
+        throw new Error(msg);
+      }
+
+      const url = data?.url;
+      if (!url) {
+        console.error('[billing] checkout response missing url', data);
+        throw new Error('Checkout did not return a redirect URL. Check server price mapping.');
+      }
+
+      // Redirect user to Stripe Checkout
+      window.location.assign(url);
+    } catch (err: any) {
+      console.error('[billing] error', err);
+      alert(err?.message ?? 'Billing request failed. See console for details.');
+    }
   }
 
   return (
@@ -291,7 +404,6 @@ export default function AccountSettingsPage() {
                     <strong>{l.provider}</strong>
                     {l.email && <div className="subtitle">{l.email}</div>}
                   </div>
-                  {/* Hide unlink for single-provider accounts */}
                   {l.provider !== 'email' && (
                     <button className="btn btn--sm accent-rose" onClick={() => unlinkProvider(l.provider)}>Unlink</button>
                   )}
@@ -302,36 +414,36 @@ export default function AccountSettingsPage() {
         </div>
       </section>
 
-{/* ===== Sessions & Devices ===== */}
-<section className="card section">
-  <h2 className="section-title">Active Sessions & Devices</h2>
-  {sessions.length === 0 ? (
-    <div className="subtitle">No active sessions.</div>
-  ) : (
-    <ul>
-      {sessions.map(s => (
-        <li key={s.id} className="card" style={{ margin: 6, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div>
-            <strong>{s.device}</strong>
-            <div className="subtitle">
-              IP: {s.ip} · Created: {new Date(s.created_at).toLocaleDateString()}<br />
-              Last active: {new Date(s.last_active).toLocaleString()}
-            </div>
-          </div>
-          {s.current ? (
-            <span className="btn btn--sm accent-green" aria-disabled>
-              Current
-            </span>
-          ) : (
-            <button className="btn btn--sm accent-rose" onClick={() => revokeSession(s.id)}>
-              Revoke
-            </button>
-          )}
-        </li>
-      ))}
-    </ul>
-  )}
-</section>
+      {/* ===== Sessions & Devices ===== */}
+      <section className="card section">
+        <h2 className="section-title">Active Sessions & Devices</h2>
+        {sessions.length === 0 ? (
+          <div className="subtitle">No active sessions.</div>
+        ) : (
+          <ul>
+            {sessions.map(s => (
+              <li key={s.id} className="card" style={{ margin: 6, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div>
+                  <strong>{s.device}</strong>
+                  <div className="subtitle">
+                    IP: {s.ip} · Created: {new Date(s.created_at).toLocaleDateString()}<br />
+                    Last active: {new Date(s.last_active).toLocaleString()}
+                  </div>
+                </div>
+                {s.current ? (
+                  <span className="btn btn--sm accent-green" aria-disabled>
+                    Current
+                  </span>
+                ) : (
+                  <button className="btn btn--sm accent-rose" onClick={() => revokeSession(s.id)}>
+                    Revoke
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
 
       {/* ===== Notifications & UI ===== */}
       <section className="card section">
@@ -386,7 +498,7 @@ export default function AccountSettingsPage() {
               </ul>
               <button
                 className="btn btn--sm accent-green"
-                onClick={() => goToBilling(p.name.toLowerCase() === 'free' ? 'downgrade' : 'upgrade')}
+                onClick={() => goToBilling(p.code as 'free'|'plus'|'premium')}
               >
                 {p.name === plan.plan ? 'Current' : (p.name.toLowerCase() === 'free' ? 'Downgrade' : 'Upgrade')}
               </button>
