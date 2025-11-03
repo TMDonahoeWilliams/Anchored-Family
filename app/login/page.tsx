@@ -141,6 +141,21 @@ export default function LoginPage() {
         expiresIn = Math.max(60, Number(expiresAt) - nowSec);
       }
 
+      // --- INSERTED SNIPPET START ---
+      // send raw JWT to server so server-side pages can validate it
+      // (this is the snippet you asked to add)
+      console.log('[login] token preview=', accessToken ? `${accessToken.slice(0, 4)}...${accessToken.slice(-4)}` : null);
+
+      await fetch('/api/auth/set-server-session', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ access_token: accessToken, expires_in: expiresIn }),
+      });
+      // --- INSERTED SNIPPET END ---
+
+      // Optionally also use the helper which performs the same call and logs response
+      // (kept for backwards-compatibility / richer error handling)
       try {
         await setServerSession(accessToken, expiresIn);
         console.log('[login] set-server-session succeeded, navigating');
