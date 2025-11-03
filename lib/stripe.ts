@@ -1,6 +1,5 @@
 // lib/stripe.ts
 // Shared client-side helpers for subscription plans and formatting.
-// Exported for use by subscription UI components.
 
 export type PlanKey = 'BASIC' | 'PLUS' | 'PREMIUM';
 
@@ -13,16 +12,13 @@ export type SubscriptionPlan = {
 };
 
 /**
- * Read public price IDs from NEXT_PUBLIC_ env vars so the client can submit the
- * correct price_id to your checkout endpoint. Make sure you set these in Vercel:
+ * Public price IDs read from NEXT_PUBLIC_* env vars so the client can submit
+ * the correct price_id to your checkout endpoint. Make sure you set these in Vercel:
  * - NEXT_PUBLIC_PRICE_BASIC_ID
  * - NEXT_PUBLIC_PRICE_PLUS_ID
  * - NEXT_PUBLIC_PRICE_PREMIUM_ID
  *
- * If you use different env var names on the server, ensure your server-side mapping
- * uses the same IDs for creating Checkout Sessions. The client should not be the
- * authoritative source for price config in production, but providing priceId here
- * makes the quick form POST approach used in the UI work.
+ * Note: In production the server should be the authoritative source of price IDs.
  */
 const BASIC_PRICE_ID = process.env.NEXT_PUBLIC_PRICE_BASIC_ID || '';
 const PLUS_PRICE_ID = process.env.NEXT_PUBLIC_PRICE_PLUS_ID || '';
@@ -59,17 +55,11 @@ export const SUBSCRIPTION_PLANS: Record<PlanKey, SubscriptionPlan> = {
 export function formatPrice(value: number | string): string {
   const n = typeof value === 'string' ? Number(value) : value;
   if (Number.isNaN(n)) return '$0.00';
-  // Use toLocaleString for proper formatting; force en-US and USD for now.
   return n.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 });
 }
 
-/**
- * Helper to get priceId for a plan key.
- * Throws if plan not found. Returns empty string if a priceId isn't configured.
- */
 export function getPriceIdForPlan(key: PlanKey): string {
-  const p = SUBSCRIPTION_PLANS[key];
-  return p?.priceId ?? '';
+  return SUBSCRIPTION_PLANS[key].priceId;
 }
 
 export default {
