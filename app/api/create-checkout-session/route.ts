@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getStripeInstance } from '@/lib/stripe';
+import { getStripeInstance } from '@/lib/stripeServer';
+import Stripe from 'stripe';
 
 export async function POST(request: NextRequest) {
   try {
@@ -118,3 +119,4 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Unable to create checkout session' }, { status: 500 });
   }
 }
+
