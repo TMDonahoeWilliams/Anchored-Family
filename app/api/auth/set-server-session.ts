@@ -13,9 +13,15 @@ function makeCorsHeaders(origin: string | null) {
   headers.set('Access-Control-Allow-Origin', origin ?? '*');
   headers.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
   headers.set('Access-Control-Allow-Headers', 'Content-Type');
-  headers.set('Access-Control-Allow-Credentials', 'true');
+  // Allow credentials only when an explicit origin is provided
+  if (origin) headers.set('Access-Control-Allow-Credentials', 'true');
   headers.set('Vary', 'Origin');
   return headers;
+}
+
+// Strict JWT check: base64url.base64url.base64url
+function looksLikeJwt(s: string) {
+  return /^[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+$/.test(s);
 }
 
 function tryExtractToken(candidate: any): string | null {
@@ -23,34 +29,44 @@ function tryExtractToken(candidate: any): string | null {
 
   if (typeof candidate === 'string') {
     let s = candidate.trim();
-    // Accept "Bearer <token>"
-    if (s.toLowerCase().startsWith('bearer ')) s = s.slice(7).trim();
-    // Remove surrounding quotes
+
+    // If it's a quoted string, unquote
     if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) {
       s = s.slice(1, -1);
     }
-    // If it is url-encoded JSON or JSON string, try to parse and extract access_token
+
+    // Accept "Bearer <token>"
+    if (s.toLowerCase().startsWith('bearer ')) s = s.slice(7).trim();
+
+    // If it looks like JWT, return it
+    if (looksLikeJwt(s)) return s;
+
+    // If string is JSON or url-encoded JSON try to parse and extract access_token
     try {
-      if ((s.startsWith('%7B') && s.includes('%22access_token%22')) || (s.startsWith('{') && s.includes('"access_token"'))) {
-        const decoded = decodeURIComponent(s);
+      const decoded = s.includes('%7B') ? decodeURIComponent(s) : s;
+      if ((decoded.startsWith('{') && decoded.includes('access_token')) || decoded.includes('"access_token"')) {
         const parsed = JSON.parse(decoded);
-        if (parsed?.access_token) return String(parsed.access_token);
+        if (parsed?.access_token && typeof parsed.access_token === 'string' && looksLikeJwt(parsed.access_token)) {
+          return parsed.access_token;
+        }
       }
-    } catch (e) {}
-    try {
-      if ((s.startsWith('{') && s.includes('access_token')) || s.includes('"access_token"')) {
-        const parsed = JSON.parse(s);
-        if (parsed?.access_token) return String(parsed.access_token);
-      }
-    } catch (e) {}
-    return s || null;
+    } catch (e) {
+      // ignore parse errors
+    }
+
+    // otherwise do not return arbitrary strings (avoid storing non-JWT strings)
+    return null;
   }
 
   if (typeof candidate === 'object') {
-    if (candidate?.access_token) return String(candidate.access_token);
-    if (candidate?.session?.access_token) return String(candidate.session.access_token);
-    if (candidate?.currentSession?.access_token) return String(candidate.currentSession.access_token);
-    if (candidate?.token) return String(candidate.token);
+    // candidate may be a session object or other shapes
+    const maybe =
+      candidate?.access_token ??
+      candidate?.session?.access_token ??
+      candidate?.currentSession?.access_token ??
+      candidate?.token ??
+      null;
+    if (maybe && typeof maybe === 'string' && looksLikeJwt(maybe)) return maybe;
     return null;
   }
 
@@ -68,34 +84,25 @@ export async function OPTIONS(req: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const origin = request.headers.get('origin') ?? null;
-    console.log('[set-server-session] incoming headers:', JSON.stringify(Object.fromEntries(request.headers.entries())));
+    console.log('[set-server-session] incoming POST, origin=', origin);
 
     const body = await request.json().catch(() => ({}));
-    // The client might send { access_token: '...' } or a whole session object or just the token string
+    // Support body being { access_token } or full session or raw string
     let tokenCandidate = body?.access_token ?? body?.token ?? body?.session ?? body ?? null;
     if (!tokenCandidate && typeof body === 'string') {
-      // body might be a raw string
       tokenCandidate = body;
     }
 
     const token = tryExtractToken(tokenCandidate);
     if (!token) {
-      console.log('[set-server-session] no token found in payload (preview):', JSON.stringify(body).slice(0, 400));
-      const bad = NextResponse.json({ error: 'No access_token found in request body' }, { status: 400 });
+      console.warn('[set-server-session] no valid JWT access_token found in request payload (preview):', JSON.stringify(body).slice(0, 400));
+      const bad = NextResponse.json({ error: 'No valid access_token (JWT) found in request body' }, { status: 400 });
       makeCorsHeaders(origin).forEach((v, k) => bad.headers.set(k, v));
       return bad;
     }
 
-    // Validate simple JWT shape (3 segments)
-    const parts = String(token).split('.');
-    if (parts.length !== 3) {
-      console.log('[set-server-session] token malformed preview=', mask(String(token)));
-      const bad = NextResponse.json({ error: 'Provided token is not a valid JWT (malformed)' }, { status: 400 });
-      makeCorsHeaders(origin).forEach((v, k) => bad.headers.set(k, v));
-      return bad;
-    }
-
-    // set cookie
+    // Set cookie options
+    // NOTE: only set domain if explicitly configured; leave undefined for host-only cookies (preview deployments)
     const cookieDomain = process.env.COOKIE_DOMAIN || undefined; // e.g. ".anchoredfamily.com"
     const expiresIn = Number(body?.expires_in ?? 60 * 60 * 24 * 14);
     const res = NextResponse.json({ ok: true }, { status: 200 });
@@ -104,7 +111,7 @@ export async function POST(request: NextRequest) {
       name: 'sb:token',
       value: token,
       httpOnly: true,
-      secure: true,
+      secure: process.env.NODE_ENV === 'production',
       sameSite: 'lax',
       path: '/',
       maxAge: Math.floor(expiresIn),
@@ -112,6 +119,7 @@ export async function POST(request: NextRequest) {
     });
 
     makeCorsHeaders(origin).forEach((v, k) => res.headers.set(k, v));
+    // Mask preview only, do not log full token
     console.log('[set-server-session] cookie set tokenPreview=', mask(token), 'domain=', cookieDomain ?? '(host-only)');
     return res;
   } catch (err: any) {
