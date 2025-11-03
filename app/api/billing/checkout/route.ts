@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getStripeInstance } from '@/lib/stripe';
+import { getStripeInstance } from '@/lib/stripeServer';
+import Stripe from 'stripe';
 
 export const runtime = 'nodejs';
 
@@ -237,3 +238,4 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Unable to create checkout session' }, { status: 500, headers: corsHeaders() });
   }
 }
+
