@@ -99,6 +99,9 @@ export default function SignupPage() {
     setSubmitting(true);
     try {
       // 1) Create household + rows
+      // Expectation: /api/signup returns at minimum { household_id, user_id? }
+      // - user_id should be the canonical app user id (Supabase UUID) if the server created the user.
+      // If your server returns the manager's username instead, see "Notes" below.
       const res = await fetch('/api/signup', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -115,46 +118,59 @@ export default function SignupPage() {
       }
 
       const householdId = data?.household_id as string | undefined;
+      // Prefer server-provided canonical user id (e.g. Supabase user id). Fall back to mgr.user_id (username) only if server didn't return one.
+      const canonicalUserId = (data?.user_id as string | undefined) ?? (data?.manager_id as string | undefined) ?? mgr.user_id;
+
       if (!householdId) throw new Error('Missing household id from signup response.');
 
       // 2) Plan branch
       if (selectedPlan === 'basic') {
         // Go verify email & login
+        // default next param could be /home; login page will use sanitized next
         router.push('/login?checkEmail=1');
-      } else {
-        // Create Stripe checkout (plan = 'plus' | 'premium')
-        // Send the plan string directly; ensure server maps 'plus'/'premium' to the correct Stripe price IDs.
-        const billingPlan = selectedPlan;
-
-        const cRes = await fetch('/api/billing/checkout', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            plan: billingPlan,
-            orgId: householdId,            // treating household as org
-            userId: mgr.user_id,           // your external id for admin/customer
-            successPath: '/dashboard?welcome=1',
-            cancelPath: '/settings/billing?canceled=1'
-          }),
-        });
-
-        const cData = await safeParseResponse(cRes, '/api/billing/checkout');
-
-        if (!cRes.ok) {
-          const serverMsg = cData?.error || `Checkout init failed with status ${cRes.status}`;
-          throw new Error(serverMsg);
-        }
-
-        const url = cData?.url as string | undefined;
-        if (!url) {
-          // If server returned something unexpected, include raw data in the error
-          throw new Error(`Unable to start checkout: missing URL in response. Response preview: ${JSON.stringify(cData)}`);
-        }
-
-        // 3) Redirect to Stripe
-        // window.location.assign is fine in client components
-        window.location.assign(url);
+        return;
       }
+
+      // For paid plans — prepare checkout payload.
+      // IMPORTANT: pass the canonical user id (server-side user id / supabase id) in client_reference_id/metadata
+      // so the webhook can reliably associate the Stripe session with your app user.
+      // Also include customer_email so Stripe has the correct billing email and the webhook can fallback by email if needed.
+      const billingPlan = selectedPlan;
+      const checkoutPayload = {
+        plan: billingPlan,
+        orgId: householdId,              // treating household as org
+        // Use canonicalUserId (server-created user id) if available. Do not rely only on visible username.
+        userId: canonicalUserId,
+        customer_email: mgr.email,
+        // Provide the exact success/cancel paths you want Stripe to redirect to.
+        // Note: server should build the full URL using APP_URL or process the provided path correctly.
+        // Use /home as the desired in-app landing after successful purchase.
+        successPath: '/home?welcome=1&session_id={CHECKOUT_SESSION_ID}',
+        cancelPath: '/settings/billing?canceled=1',
+      };
+
+      const cRes = await fetch('/api/billing/checkout', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(checkoutPayload),
+      });
+
+      const cData = await safeParseResponse(cRes, '/api/billing/checkout');
+
+      if (!cRes.ok) {
+        const serverMsg = cData?.error || `Checkout init failed with status ${cRes.status}`;
+        throw new Error(serverMsg);
+      }
+
+      const url = cData?.url as string | undefined;
+      if (!url) {
+        // If server returned something unexpected, include raw data in the error
+        throw new Error(`Unable to start checkout: missing URL in response. Response preview: ${JSON.stringify(cData)}`);
+      }
+
+      // 3) Redirect to Stripe
+      // window.location.assign is fine in client components
+      window.location.assign(url);
     } catch (e: any) {
       // Show friendly message; keep the detailed message for debugging
       setError(e?.message || 'Something went wrong.');
@@ -299,5 +315,3 @@ export default function SignupPage() {
     </div>
   );
 }
-
-
