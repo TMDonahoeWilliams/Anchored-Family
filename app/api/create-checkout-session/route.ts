@@ -1,122 +1,110 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { createClient } from '@supabase/supabase-js';
 import { getStripeInstance } from '@/lib/stripeServer';
-import Stripe from 'stripe';
 
-export async function POST(request: NextRequest) {
-  try {
-    const stripe = getStripeInstance();
-    if (!stripe) {
-      console.error('Stripe not configured (missing secret key).');
-      return NextResponse.json({ error: 'Payment provider not configured' }, { status: 500 });
-    }
+export const runtime = 'nodejs';
 
-    // Robust body parsing: support JSON and form-data
-    const contentType = (request.headers.get('content-type') || '').toLowerCase();
-    let priceId: string | undefined;
-    let lookupKey: string | undefined;
-
-    if (contentType.includes('application/json')) {
-      const json = await request.json().catch(() => null);
-      priceId = json?.price_id ?? json?.priceId;
-      lookupKey = json?.lookup_key ?? json?.lookupKey;
-    } else {
-      const form = await request.formData().catch(() => null);
-      priceId = form?.get('price_id')?.toString();
-      lookupKey = form?.get('lookup_key')?.toString();
-    }
-
-    if (!priceId && !lookupKey) {
-      return NextResponse.json({ error: 'Price ID or lookup key is required' }, { status: 400 });
-    }
-
-    if (priceId && priceId.includes('not_configured')) {
-      return NextResponse.json(
-        {
-          error:
-            'Stripe prices are not configured. Please set up products in the Stripe Dashboard and update STRIPE_PRICE_ID_* environment variables.',
-        },
-        { status: 500 }
-      );
-    }
-
-    // Resolve origin for success/cancel URLs
-    const origin =
-      request.headers.get('origin') ||
-      (request.nextUrl && (request.nextUrl as any).origin) ||
-      process.env.NEXT_PUBLIC_SITE_URL;
-    if (!origin) {
-      console.error('Origin not available to build redirect URLs.');
-      return NextResponse.json({ error: 'Server configuration error' }, { status: 500 });
-    }
-
-    // Resolve finalPriceId (from priceId or lookupKey)
-    let finalPriceId = priceId;
-    let resolvedPrice: any = null;
-    if (lookupKey && !priceId) {
-      const prices = await stripe.prices.list({
-        lookup_keys: [lookupKey],
-        expand: ['data.product'],
-        limit: 1,
-      });
-
-      if (!prices || !prices.data || prices.data.length === 0) {
-        return NextResponse.json({ error: 'Price not found for lookup key' }, { status: 404 });
-      }
-
-      resolvedPrice = prices.data[0];
-      finalPriceId = resolvedPrice.id;
-    }
-
-    if (!finalPriceId) {
-      return NextResponse.json({ error: 'Unable to resolve price for checkout' }, { status: 400 });
-    }
-
-    // Validate recurring for subscription mode
-    if (!resolvedPrice) {
-      try {
-        resolvedPrice = await stripe.prices.retrieve(finalPriceId);
-      } catch (e) {
-        console.error('Failed to retrieve price for validation', e);
-        return NextResponse.json({ error: 'Invalid price id provided' }, { status: 400 });
-      }
-    }
-    if (resolvedPrice && !resolvedPrice.recurring) {
-      return NextResponse.json(
-        { error: 'Price is not a recurring price. Subscriptions require recurring prices.' },
-        { status: 400 }
-      );
-    }
-
-    // Create Checkout Session (keep parameters stable/compatible)
-    const session = await stripe.checkout.sessions.create({
-      line_items: [{ price: finalPriceId, quantity: 1 }],
-      mode: 'subscription',
-      success_url: `${origin}/account/settings/subscription/success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${origin}/account/settings/subscription?canceled=true`,
-      automatic_tax: { enabled: true },
-      billing_address_collection: 'required',
-      customer_creation: 'always',
-      metadata: { source: 'anchored_family_app' },
-      subscription_data: { metadata: { source: 'anchored_family_app' } },
-    });
-
-    if (!session) {
-      console.error('Stripe returned no session object');
-      return NextResponse.json({ error: 'Failed to create checkout session' }, { status: 500 });
-    }
-
-    // session.url may be undefined in some situations — guard for it
-    if (!session.url) {
-      console.error('Stripe session created but no URL returned', session);
-      return NextResponse.json({ error: 'Failed to create checkout URL' }, { status: 500 });
-    }
-
-    // Success: always return JSON
-    return NextResponse.json({ url: session.url }, { status: 200 });
-  } catch (err) {
-    // Log full internal error, but return safe JSON to client
-    console.error('Error creating checkout session:', err);
-    return NextResponse.json({ error: 'Unable to create checkout session' }, { status: 500 });
-  }
+// Helper to parse access token from Bearer header or Supabase cookie (sb:token)
+function extractAccessToken(req: NextRequest): string | null {
+  const auth = req.headers.get('authorization') || '';
+  if (auth.startsWith('Bearer ')) return auth.split('Bearer ')[1];
+  // Fallback: try Supabase session cookie format (sb:token)
+  const cookie = req.headers.get('cookie') || '';
+  const match = cookie.match(/sb:token=([^;]+)/);
+  if (match) return decodeURIComponent(match[1]);
+  return null;
 }
 
+export async function POST(req: NextRequest) {
+  try {
+    const stripe = getStripeInstance();
+    if (!stripe) return NextResponse.json({ error: 'Stripe not configured' }, { status: 500 });
+
+    const SUPABASE_URL = process.env.SUPABASE_URL!;
+    const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+    if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+      console.error('[create-checkout-session] Missing Supabase service role env vars');
+      return NextResponse.json({ error: 'Server misconfigured' }, { status: 500 });
+    }
+
+    const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } });
+
+    // Authenticate user via access token from header or cookie
+    const token = extractAccessToken(req);
+    if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+    const { data: userData, error: userErr } = await supabaseAdmin.auth.getUser(token);
+    if (userErr || !userData?.user) {
+      console.error('[create-checkout-session] auth.getUser failed', userErr);
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+    const user = userData.user;
+    const userId = user.id;
+
+    // Read body (expect { plan: 'basic'|'plus'|'premium' } or { priceId: 'price_xxx' })
+    const body = await req.json().catch(() => ({}));
+    const plan = (body?.plan as string | undefined) || null;
+    const priceIdFromClient = (body?.priceId as string | undefined) || null;
+
+    // Map plan to server-known price ids (server-side trust)
+    const PRICE_MAP: Record<string, string> = {
+      basic: process.env.STRIPE_PRICE_BASIC_ID || '',
+      plus: process.env.STRIPE_PRICE_PLUS_ID || '',
+      premium: process.env.STRIPE_PRICE_PREMIUM_ID || '',
+    };
+
+    let priceId = priceIdFromClient ?? (plan ? PRICE_MAP[plan] : null);
+    if (!priceId) {
+      return NextResponse.json({ error: 'Price ID or valid plan required' }, { status: 400 });
+    }
+
+    // Find or create a Stripe customer for this user. Assume you maintain a 'customers' table:
+    // customers(user_id, customer_id, created_at, updated_at)
+    let customerId: string | null = null;
+    const { data: existingCustomer, error: existingCustomerErr } = await supabaseAdmin
+      .from('customers')
+      .select('customer_id')
+      .eq('user_id', userId)
+      .limit(1)
+      .single();
+
+    if (!existingCustomerErr && existingCustomer?.customer_id) {
+      customerId = existingCustomer.customer_id;
+    } else {
+      // Create a new Stripe Customer and persist mapping to customers table
+      const newCustomer = await stripe.customers.create({
+        email: user.email ?? undefined,
+        metadata: { user_id: userId },
+      });
+      customerId = newCustomer.id;
+      const { error: insertErr } = await supabaseAdmin.from('customers').insert({
+        user_id: userId,
+        customer_id: customerId,
+        created_at: new Date().toISOString(),
+      });
+      if (insertErr) {
+        console.warn('[create-checkout-session] failed to insert customers mapping', insertErr);
+        // not fatal for checkout creation, but log
+      }
+    }
+
+    const successUrl = (process.env.NEXT_PUBLIC_APP_URL || process.env.APP_URL || '') + '/account/settings/subscription?success=true';
+    const cancelUrl = (process.env.NEXT_PUBLIC_APP_URL || process.env.APP_URL || '') + '/account/settings/subscription?canceled=true';
+
+    const session = await stripe.checkout.sessions.create({
+      mode: 'subscription',
+      payment_method_types: ['card'],
+      line_items: [{ price: priceId, quantity: 1 }],
+      customer: customerId || undefined,
+      client_reference_id: userId,
+      metadata: { user_id: userId },
+      success_url: successUrl,
+      cancel_url: cancelUrl,
+    });
+
+    return NextResponse.json({ url: session.url }, { status: 200 });
+  } catch (err: any) {
+    console.error('[create-checkout-session] error', err);
+    return NextResponse.json({ error: err?.message ?? 'Internal error' }, { status: 500 });
+  }
+}
