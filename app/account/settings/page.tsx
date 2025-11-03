@@ -176,8 +176,8 @@ export default function AccountSettingsPage() {
 
   const planCompare = useMemo(
     () => [
-      { name: 'Free',    price: '$0',     perks: ['Core features', '1 household', 'Basic support'], code: 'free' },
-      { name: 'Plus',    price: '$4.99',  perks: ['Family Planner Pro', 'Recipe AI ideas', 'Priority support'], code: 'plus' },
+      { name: 'Basic',    price: '$4.99',     perks: ['Core features', '1 household', 'Basic support'], code: 'free' },
+      { name: 'Plus',    price: '$7.99',  perks: ['Family Planner Pro', 'Recipe AI ideas', 'Priority support'], code: 'plus' },
       { name: 'Premium', price: '$9.99',  perks: ['Everything in Plus', 'Unlimited households', 'Vault & Devotion Pro', 'Advanced sharing'], code: 'premium' },
     ],
     []
