@@ -1,0 +1,27 @@
+on:
+  workflow_dispatch:
+
+jobs:
+  backfill_customers:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install dependencies
+        run: |
+          npm ci || true
+          npm i stripe @supabase/supabase-js ts-node typescript --no-audit --no-fund
+
+      - name: Run backfill_customers
+        env:
+          STRIPE_SECRET_KEY: ${{ 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 }}
+          SUPABASE_URL: ${{ https://kkhlgemlrgqgfybsrpya.supabase.co}}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtraGxnZW1scmdxZ2Z5YnNycHlhIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1OTY2NjE4NiwiZXhwIjoyMDc1MjQyMTg2fQ.OLMT1nTcSTLH8mDu2aB0ZreiJPQYFy9yxGcm96ceid0 }}
+        run: |
+          npx ts-node scripts/backfill_customers.ts
