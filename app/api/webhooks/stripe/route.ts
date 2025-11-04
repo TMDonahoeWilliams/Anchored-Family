@@ -32,9 +32,16 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Stripe not configured' }, { status: 500, headers });
   }
 
-  const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
-  if (!STRIPE_WEBHOOK_SECRET) {
-    console.error('[webhook] STRIPE_WEBHOOK_SECRET not set');
+  // Build list of webhook signing secrets (support single or multiple)
+  const primarySecret = process.env.STRIPE_WEBHOOK_SECRET;
+  const altSecretsCsv = process.env.STRIPE_WEBHOOK_SECRETS || process.env.STRIPE_WEBHOOK_SECRET_ALT || '';
+  const altSecrets = altSecretsCsv ? altSecretsCsv.split(',').map(s => s.trim()).filter(Boolean) : [];
+  const webhookSecrets: string[] = [];
+  if (primarySecret) webhookSecrets.push(primarySecret);
+  webhookSecrets.push(...altSecrets);
+
+  if (webhookSecrets.length === 0) {
+    console.error('[webhook] No STRIPE_WEBHOOK_SECRET configured');
     return NextResponse.json({ error: 'Webhook secret not configured' }, { status: 500, headers });
   }
 
@@ -46,7 +53,7 @@ export async function POST(req: NextRequest) {
   }
   const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } });
 
-  // read raw body
+  // IMPORTANT: read raw body exactly once
   const payload = await req.text();
   const sig = req.headers.get('stripe-signature') || req.headers.get('Stripe-Signature');
 
@@ -59,19 +66,52 @@ export async function POST(req: NextRequest) {
 
   console.log('[webhook] signature header preview:', mask(sig));
 
-  let event: any;
-  try {
-    event = stripe.webhooks.constructEvent(payload, sig, STRIPE_WEBHOOK_SECRET);
-  } catch (err: any) {
-    console.error('[webhook] signature verification failed:', err?.message ?? err);
-    console.error('[webhook] payload preview:', payload.slice(0, 1000));
-    return NextResponse.json({ error: `Webhook signature verification failed: ${err?.message ?? String(err)}` }, { status: 400, headers });
+  let event: any = null;
+  let verificationError: any = null;
+
+  // Try verifying with each secret (useful if you have multiple event destinations or rotated secrets)
+  for (const secret of webhookSecrets) {
+    try {
+      event = stripe.webhooks.constructEvent(payload, sig, secret);
+      console.log('[webhook] verification succeeded with one of the secrets (masked):', mask(secret));
+      break;
+    } catch (err: any) {
+      // keep trying other secrets
+      verificationError = err;
+    }
   }
 
+  // If no secret matched
+  if (!event) {
+    // Attempt a safe parse to detect harmless ping events (do NOT treat parse result as verified)
+    let parsed: any = null;
+    try {
+      parsed = JSON.parse(payload);
+    } catch (e) {
+      // not valid JSON - return verification error
+      console.error('[webhook] signature verification failed and payload is not valid JSON:', verificationError?.message ?? verificationError);
+      return NextResponse.json({ error: `Webhook signature verification failed: ${verificationError?.message ?? String(verificationError)}` }, { status: 400, headers });
+    }
+
+    // If this is Stripe v2 "event_destination.ping", acknowledge it (it's a harmless ping)
+    const potentiallyPingTypes = ['v2.core.event_destination.ping', 'v2.core.event.ping', 'event.destination.ping'];
+    if (parsed?.type && potentiallyPingTypes.includes(parsed.type)) {
+      console.log('[webhook] received ping event (unverified) — acknowledging 200 to Stripe, type=', parsed.type);
+      // Don't process further, just acknowledge so Stripe stops retrying pings
+      return NextResponse.json({ received: true, note: 'ping acknowledged' }, { status: 200, headers });
+    }
+
+    // Otherwise return the verification error (do not process unverified events)
+    console.error('[webhook] signature verification failed:', verificationError?.message ?? verificationError);
+    console.error('[webhook] payload preview:', payload.slice(0, 1000));
+    return NextResponse.json({ error: `Webhook signature verification failed: ${verificationError?.message ?? String(verificationError)}` }, { status: 400, headers });
+  }
+
+  // Verified event — handle relevant types
   try {
     console.log('[webhook] verified event type=', event.type);
 
-    // Helper to upsert subscription row
+    // Helper to upsert subscription row (same logic as before)
     async function upsertSubscriptionFromStripeSubscription(sub: any, userIdFromCustomers?: string | null) {
       const stripeSubId = sub.id;
       const cust = typeof sub.customer === 'string' ? sub.customer : sub.customer?.id;
@@ -80,7 +120,6 @@ export async function POST(req: NextRequest) {
       const cps = sub.current_period_start ? new Date(Number(sub.current_period_start) * 1000).toISOString() : null;
       const cpe = sub.current_period_end ? new Date(Number(sub.current_period_end) * 1000).toISOString() : null;
 
-      // Resolve user_id: prefer metadata or client_reference, else lookup customers mapping
       let userId: string | null = userIdFromCustomers ?? (sub.metadata?.user_id ?? null);
 
       if (!userId && cust) {
@@ -104,7 +143,6 @@ export async function POST(req: NextRequest) {
         updated_at: new Date().toISOString(),
       };
 
-      // If creating, ensure created_at is set
       const { error: upsertErr } = await supabaseAdmin
         .from('subscriptions')
         .upsert(upsertRow, { onConflict: 'stripe_subscription_id' });
@@ -121,17 +159,13 @@ export async function POST(req: NextRequest) {
         const session = event.data.object as any;
         const userId = session.client_reference_id ?? session.metadata?.user_id ?? null;
         const subscriptionId = session.subscription ?? null;
-        const customerId = session.customer ?? null;
 
         if (subscriptionId) {
-          // retrieve subscription to get expanded details
           const subscription = await stripe.subscriptions.retrieve(String(subscriptionId), { expand: ['items.data.price'] });
           await upsertSubscriptionFromStripeSubscription(subscription, userId);
         } else {
-          // No subscription on session; might be one-time payment — handle accordingly
           console.log('[webhook] checkout.session.completed without subscription', session.id);
         }
-
         break;
       }
 
@@ -139,17 +173,14 @@ export async function POST(req: NextRequest) {
       case 'customer.subscription.updated':
       case 'customer.subscription.deleted': {
         const subscription = event.data.object as any;
-        // upsert subscription row
         await upsertSubscriptionFromStripeSubscription(subscription);
         break;
       }
 
       case 'invoice.payment_succeeded': {
         const invoice = event.data.object as any;
-        // Optionally update subscription status if needed
         const stripeSubId = invoice.subscription;
         if (stripeSubId) {
-          // fetch subscription to update periods and status
           const subscription = await stripe.subscriptions.retrieve(String(stripeSubId), { expand: ['items.data.price'] });
           await upsertSubscriptionFromStripeSubscription(subscription);
         }
