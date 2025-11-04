@@ -2,11 +2,20 @@
 
 import { useState, useEffect } from 'react';
 import { SUBSCRIPTION_PLANS, formatPrice } from '@/lib/stripe';
+import { createClient } from '@supabase/supabase-js';
+
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+);
 
 export default function SubscriptionPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [selectedPlan, setSelectedPlan] = useState<'BASIC' | 'PLUS' | 'PREMIUM' | null>(null);
   const [canceled, setCanceled] = useState(false);
+  const [currentPlanKey, setCurrentPlanKey] = useState<string | null>(null);
+  const [currentSubscription, setCurrentSubscription] = useState<any | null>(null);
+  const [checkingCurrent, setCheckingCurrent] = useState(true);
 
   useEffect(() => {
     // Check if user was redirected from a canceled checkout
@@ -14,6 +23,67 @@ export default function SubscriptionPage() {
     if (urlParams.get('canceled') === 'true') {
       setCanceled(true);
     }
+  }, []);
+
+  // Load current subscription for logged-in user
+  useEffect(() => {
+    let cancelled = false;
+    async function loadCurrent() {
+      setCheckingCurrent(true);
+      try {
+        const {
+          data: { user },
+          error: userErr,
+        } = await supabase.auth.getUser();
+        if (userErr || !user) {
+          // user not signed in, nothing to show
+          if (!cancelled) {
+            setCurrentPlanKey(null);
+            setCurrentSubscription(null);
+            setCheckingCurrent(false);
+          }
+          return;
+        }
+
+        // Query subscriptions table — relies on RLS policy allowing authenticated users to see their own rows
+        const { data: subRows, error: subErr } = await supabase
+          .from('subscriptions')
+          .select('*')
+          .eq('user_id', user.id)
+          .order('created_at', { ascending: false })
+          .limit(1);
+
+        if (!cancelled) {
+          if (subErr) {
+            console.error('Failed to load subscription', subErr);
+            setCurrentSubscription(null);
+          } else if (subRows && subRows.length > 0) {
+            const sub = subRows[0];
+            setCurrentSubscription(sub);
+            // Map price_id -> plan key (SUBSCRIPTION_PLANS expected to have priceId)
+            const foundKey = Object.entries(SUBSCRIPTION_PLANS).find(
+              ([k, p]) => p.priceId === (sub.price_id ?? sub.priceId ?? sub.price)
+            )?.[0];
+            setCurrentPlanKey((foundKey as string) ?? null);
+          } else {
+            setCurrentSubscription(null);
+            setCurrentPlanKey(null);
+          }
+          setCheckingCurrent(false);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          console.error('Error fetching current subscription', err);
+          setCurrentSubscription(null);
+          setCurrentPlanKey(null);
+          setCheckingCurrent(false);
+        }
+      }
+    }
+    loadCurrent();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const handleSubscribe = async (planKey: 'BASIC' | 'PLUS' | 'PREMIUM') => {
@@ -43,6 +113,27 @@ export default function SubscriptionPage() {
   return (
     <div className="container">
       <h1 className="page-title">Current Plan and Billing</h1>
+
+      <section className="card section">
+        <h2 className="section-title">Your Current Plan</h2>
+        <div className="subtitle" style={{ marginBottom: '1rem' }}>
+          {checkingCurrent ? (
+            'Loading current subscription…'
+          ) : currentSubscription ? (
+            <>
+              <strong>{currentPlanKey ? SUBSCRIPTION_PLANS[currentPlanKey as keyof typeof SUBSCRIPTION_PLANS].name : 'Custom Plan'}</strong>
+              <span style={{ marginLeft: 8 }}>
+                {currentSubscription.price_id && <>{formatPrice(SUBSCRIPTION_PLANS[currentPlanKey as keyof typeof SUBSCRIPTION_PLANS]?.price ?? 0)}/{SUBSCRIPTION_PLANS[currentPlanKey as keyof typeof SUBSCRIPTION_PLANS]?.interval}</>}
+              </span>
+              <div style={{ fontSize: '0.9rem', color: '#6b7280', marginTop: 6 }}>
+                Status: {currentSubscription.status ?? 'unknown'} • Expires: {currentSubscription.current_period_end ? new Date(currentSubscription.current_period_end).toLocaleString() : '—'}
+              </div>
+            </>
+          ) : (
+            <>No active subscription found — you currently have the Basic plan.</>
+          )}
+        </div>
+      </section>
 
       {canceled && (
         <div className="card section" style={{ backgroundColor: '#fef3cd', borderColor: '#fecf47' }}>
