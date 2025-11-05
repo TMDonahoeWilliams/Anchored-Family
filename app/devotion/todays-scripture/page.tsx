@@ -1,5 +1,4 @@
 import React from 'react';
-import TodaysScriptureClient from './TodaysScriptureClient';
 
 type Scripture = {
   text: string;
@@ -9,32 +8,134 @@ type Scripture = {
   source?: string | null;
 };
 
-async function fetchTodaysScripture(): Promise<Scripture | null> {
+/**
+ * Server-side fetch: read directly from Google Sheets values API (public/viewable sheet).
+ * Uses env vars:
+ *   SPREADSHEET_ID (required)
+ *   SHEET_RANGE (optional, default 'Sheet1')
+ *   GOOGLE_SHEETS_API_KEY (required for public sheets)
+ *   SHEET_REVALIDATE_SECONDS (optional, default 60)
+ *
+ * This avoids calling your own /api route (and avoids localhost fallback/ECONNREFUSED).
+ */
+const SPREADSHEET_ID = process.env.SPREADSHEET_ID || '';
+const SHEET_RANGE = process.env.SHEET_RANGE || 'Sheet1';
+const GOOGLE_API_KEY = process.env.GOOGLE_SHEETS_API_KEY || '';
+const REVALIDATE_SECONDS = Number(process.env.SHEET_REVALIDATE_SECONDS ?? '60');
+
+function normalizeHeader(h: string) {
+  return String(h ?? '').trim().toLowerCase();
+}
+
+function mapRowToObject(headers: string[], row: string[]) {
+  const headerIndex: Record<string, number> = {};
+  for (let i = 0; i < headers.length; i++) headerIndex[normalizeHeader(headers[i])] = i;
+
+  const headersMapping: Record<string, string[]> = {
+    date: ['date', 'day', 'published_at'],
+    text: ['text', 'scripture', 'verse', 'body'],
+    reference: ['reference', 'ref'],
+    version: ['version'],
+    source: ['source'],
+  };
+
+  const result: any = { date: null, text: null, reference: null, version: null, source: null };
+
+  for (const [canon, synonyms] of Object.entries(headersMapping)) {
+    let found: string | null = null;
+    for (const syn of synonyms) {
+      const idx = headerIndex[normalizeHeader(syn)];
+      if (typeof idx === 'number') {
+        found = row[idx] ?? null;
+        break;
+      }
+    }
+    if (!found) {
+      const idx = headerIndex[canon];
+      if (typeof idx === 'number') found = row[idx] ?? null;
+    }
+    result[canon] = found ?? null;
+  }
+
+  return result;
+}
+
+function todayISODate() {
+  const d = new Date();
+  const yyyy = d.getUTCFullYear();
+  const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(d.getUTCDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+async function fetchTodaysScriptureFromSheet(): Promise<Scripture | null> {
+  if (!SPREADSHEET_ID) {
+    console.error('[todays-scripture] missing SPREADSHEET_ID env var');
+    return null;
+  }
+  if (!GOOGLE_API_KEY) {
+    console.error('[todays-scripture] missing GOOGLE_SHEETS_API_KEY env var');
+    return null;
+  }
+
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(
+    SPREADSHEET_ID,
+  )}/values/${encodeURIComponent(SHEET_RANGE)}?key=${encodeURIComponent(GOOGLE_API_KEY)}`;
+
   try {
-    const origin =
-      process.env.NEXT_PUBLIC_APP_URL ||
-      process.env.APP_URL ||
-      'http://localhost:3000';
-
-    const res = await fetch(new URL('/api/devotion/todays-scripture', origin).toString(), {
-      cache: 'no-store',
-      headers: { Accept: 'application/json' },
-    });
-
+    const res = await fetch(url, { next: { revalidate: REVALIDATE_SECONDS } });
     if (!res.ok) {
-      console.error('Failed to fetch todays scripture', await res.text());
+      const body = await res.text().catch(() => '');
+      console.error('[todays-scripture] Google Sheets API error', res.status, body);
       return null;
     }
-    const data = await res.json();
-    return data as Scripture;
-  } catch (err) {
-    console.error('Error fetching todays scripture', err);
+    const payload = await res.json();
+    const values: string[][] = payload.values ?? [];
+    if (values.length < 2) return null;
+
+    const headerRow = values[0].map(String);
+    const dataRows = values.slice(1);
+    const objects = dataRows.map((r) => mapRowToObject(headerRow, r));
+
+    const today = todayISODate();
+    const match = objects.find((o) => {
+      const d = String(o.date ?? '').trim();
+      if (!d) return false;
+      if (d === today) return true;
+      const parsed = Date.parse(d);
+      if (!isNaN(parsed)) {
+        return new Date(parsed).toISOString().slice(0, 10) === today;
+      }
+      if (d.includes('/')) {
+        const parts = d.split('/');
+        if (parts.length === 3) {
+          const mm = parts[0].padStart(2, '0');
+          const dd = parts[1].padStart(2, '0');
+          const yyyy = parts[2].length === 2 ? `20${parts[2]}` : parts[2];
+          return `${yyyy}-${mm}-${dd}` === today;
+        }
+      }
+      return false;
+    });
+
+    const chosen = match ?? objects[0] ?? null;
+    if (!chosen || !chosen.text) return null;
+
+    return {
+      text: chosen.text,
+      reference: chosen.reference ?? '',
+      version: chosen.version ?? null,
+      date: chosen.date ?? null,
+      source: chosen.source ?? null,
+    };
+  } catch (err: any) {
+    console.error('[todays-scripture] fetch failed', err?.message ?? err);
     return null;
   }
 }
 
 export default async function Page() {
-  const scripture = await fetchTodaysScripture();
+  const scripture = await fetchTodaysScriptureFromSheet();
 
   return (
     <main className="container mx-auto px-4 py-8">
@@ -57,6 +158,9 @@ export default async function Page() {
             </article>
 
             <div className="mt-6">
+              {/* Client interactivity component expected at same path (TodaysScriptureClient) */}
+              {/* If you use the component file created earlier, it will mount on the client */}
+              {/* @ts-expect-error Server component rendering client component */}
               <TodaysScriptureClient initialScripture={scripture} />
             </div>
           </>
@@ -64,6 +168,7 @@ export default async function Page() {
           <div>
             <p className="text-sm text-muted-foreground">We couldn't load today's scripture right now. Try refreshing the page.</p>
             <div className="mt-4">
+              {/* @ts-expect-error Server component rendering client component */}
               <TodaysScriptureClient initialScripture={null} />
             </div>
           </div>
