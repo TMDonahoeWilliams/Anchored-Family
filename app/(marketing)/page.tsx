@@ -17,7 +17,7 @@ export default function MarketingPage() {
             <h1 className="af-brand">Anchored Family</h1>
             <p className="af-tagline">Strong families. Steady rhythms. One simple home base.</p>
 
-            <div className="af-cta">
+            <div style={{ display: 'inline-flex', gap: '8px' }}>
               <Link href="/login" className="af-btn af-btn-outline">Log In</Link>
               <Link href="/signup" className="af-btn af-btn-outline af-btn-primary">Create Account</Link>
             </div>
@@ -83,6 +83,7 @@ export default function MarketingPage() {
     </main>
   );
 }
+
 
 
 
