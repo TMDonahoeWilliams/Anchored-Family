@@ -2,21 +2,23 @@ import { NextResponse } from 'next/server';
 
 /**
  * Today's Scripture API (Google Sheets-backed)
+ * - Robust range handling: if a given range (e.g. "Sheet1") causes "Unable to parse range",
+ *   the code will retry with sensible fallbacks like "Sheet1!A:Z" and "Sheet1!A:E".
  *
- * Supports optional query param: ?version=KJV|NKJV|NIV
- *
- * Env vars used:
+ * Env:
  * - SPREADSHEET_ID (required)
- * - SHEET_RANGE (optional, defaults to 'Sheet1')
- * - GOOGLE_SHEETS_API_KEY (optional for public sheets)
- * - GOOGLE_SERVICE_ACCOUNT_KEY (optional JSON string for private sheets)
- * - SHEET_REVALIDATE_SECONDS (optional TTL for server cache; default 60)
+ * - SHEET_RANGE (optional; if it's just a sheet name the code will attempt fallbacks)
+ * - GOOGLE_SHEETS_API_KEY (public sheets)
+ * - GOOGLE_SERVICE_ACCOUNT_KEY (private sheets; JSON string) OR GOOGLE_SERVICE_ACCOUNT_KEY_B64
+ * - SHEET_REVALIDATE_SECONDS (optional TTL; default 60)
  */
 
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID || '';
 const SHEET_RANGE = process.env.SHEET_RANGE || 'Sheet1';
 const GOOGLE_API_KEY = process.env.GOOGLE_SHEETS_API_KEY || '';
-const GOOGLE_SERVICE_ACCOUNT_KEY = process.env.GOOGLE_SERVICE_ACCOUNT_KEY || '';
+const GOOGLE_SERVICE_ACCOUNT_KEY =
+  process.env.GOOGLE_SERVICE_ACCOUNT_KEY ||
+  (process.env.GOOGLE_SERVICE_ACCOUNT_KEY_B64 ? Buffer.from(process.env.GOOGLE_SERVICE_ACCOUNT_KEY_B64, 'base64').toString('utf8') : '');
 const REVALIDATE_SECONDS = Number(process.env.SHEET_REVALIDATE_SECONDS ?? '60');
 
 const headersMapping: Record<string, string[]> = {
@@ -72,25 +74,18 @@ function todayISODate() {
   return `${yyyy}-${mm}-${dd}`;
 }
 
-/**
- * Helper to pick a scripture from an array of mapped objects,
- * honoring optional version preference.
- */
 function chooseScripture(objects: any[], versionPref?: string | null) {
   if (!objects || objects.length === 0) return null;
   const today = todayISODate();
   const vPref = versionPref ? String(versionPref).trim().toUpperCase() : null;
 
-  // 1) If versionPref: try date+version exact match
   if (vPref) {
     const match = objects.find((o) => {
       const d = String(o.date ?? '').trim();
       const ver = String(o.version ?? '').trim().toUpperCase();
       if (!d || !ver) return false;
-      // date match
       if (d === today) {
         if (ver === vPref) return true;
-        // allow version tokens: e.g., "NIV (some note)" includes "NIV"
         if (ver.includes(vPref)) return true;
       }
       return false;
@@ -98,7 +93,6 @@ function chooseScripture(objects: any[], versionPref?: string | null) {
     if (match && match.text) return match;
   }
 
-  // 2) Try any row with today's date
   const dateMatch = objects.find((o) => {
     const d = String(o.date ?? '').trim();
     if (!d) return false;
@@ -111,7 +105,6 @@ function chooseScripture(objects: any[], versionPref?: string | null) {
   });
   if (dateMatch && dateMatch.text) return dateMatch;
 
-  // 3) If versionPref: try any row that matches version (regardless of date)
   if (vPref) {
     const verAny = objects.find((o) => {
       const ver = String(o.version ?? '').trim().toUpperCase();
@@ -123,40 +116,107 @@ function chooseScripture(objects: any[], versionPref?: string | null) {
     if (verAny && verAny.text) return verAny;
   }
 
-  // 4) Fallback to first object
   return objects[0];
 }
 
-/* ---------- Fetch from public sheet via API key ---------- */
-async function fetchFromPublicSheet(spreadsheetId: string, range: string, apiKey: string, versionPref?: string | null) {
-  if (!apiKey) {
-    throw new Error('Missing GOOGLE_SHEETS_API_KEY');
+/* ---------- Helpers for trying alternate ranges ---------- */
+const RANGE_FALLBACKS = (rangeBase: string) => [
+  rangeBase,
+  `${rangeBase}!A:Z`,
+  `${rangeBase}!A:E`,
+  `${rangeBase}!A:Z`, // duplicate safe
+];
+
+async function fetchValuesWithFallbacksPublic(spreadsheetId: string, rangeBase: string, apiKey: string) {
+  if (!apiKey) throw new Error('Missing GOOGLE_SHEETS_API_KEY');
+  if (!spreadsheetId) throw new Error('Missing SPREADSHEET_ID');
+
+  let lastErr: any = null;
+  for (const r of RANGE_FALLBACKS(rangeBase)) {
+    const url = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(
+      spreadsheetId,
+    )}/values/${encodeURIComponent(r)}?key=${encodeURIComponent(apiKey)}`;
+    try {
+      const res = await fetch(url, { next: { revalidate: REVALIDATE_SECONDS } });
+      if (!res.ok) {
+        const txt = await res.text().catch(() => '');
+        // If it's an invalid range, try next fallback
+        if (res.status === 400 && txt.includes('Unable to parse range')) {
+          lastErr = new Error(`Invalid range ${r}: ${txt}`);
+          continue;
+        }
+        throw new Error(`Google Sheets API error ${res.status}: ${txt}`);
+      }
+      const payload = await res.json();
+      return payload.values ?? [];
+    } catch (err: any) {
+      lastErr = err;
+      // continue to next fallback if it's a parse/range issue; otherwise rethrow
+      if (String(err?.message).includes('Unable to parse range')) {
+        continue;
+      }
+      throw err;
+    }
   }
-  if (!spreadsheetId) {
-    throw new Error('Missing SPREADSHEET_ID');
+  throw lastErr ?? new Error('Failed to fetch sheet with any fallback ranges');
+}
+
+async function fetchValuesWithFallbacksServiceAccount(spreadsheetId: string, rangeBase: string, keyJson: string) {
+  // dynamic import
+  let google: any;
+  try {
+    // avoid bundler static analysis
+    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+    // @ts-ignore
+    const googleModule = await new Function('return import("googleapis")')();
+    google = googleModule?.google;
+    if (!google) throw new Error('googleapis module missing');
+  } catch (err: any) {
+    throw new Error(
+      'Failed to load googleapis. Install it (pnpm add googleapis) or unset GOOGLE_SERVICE_ACCOUNT_KEY. Original: ' +
+        String(err?.message ?? err),
+    );
   }
 
-  const url = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(
-    spreadsheetId,
-  )}/values/${encodeURIComponent(range)}?key=${encodeURIComponent(apiKey)}`;
+  const key = JSON.parse(keyJson);
+  const client = new google.auth.JWT({
+    email: key.client_email,
+    key: key.private_key,
+    scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
+  });
+  await client.authorize();
+  const sheets = google.sheets({ version: 'v4', auth: client });
 
-  const res = await fetch(url, { next: { revalidate: REVALIDATE_SECONDS } });
-  if (!res.ok) {
-    const txt = await res.text().catch(() => '');
-    throw new Error(`Google Sheets API error ${res.status}: ${txt}`);
+  let lastErr: any = null;
+  for (const r of RANGE_FALLBACKS(rangeBase)) {
+    try {
+      const resp = await sheets.spreadsheets.values.get({
+        spreadsheetId,
+        range: r,
+      });
+      return resp.data.values ?? [];
+    } catch (err: any) {
+      // detect invalid range and try next fallback
+      const msg = String(err?.response?.data?.error?.message ?? err?.message ?? err);
+      lastErr = new Error(msg);
+      if (msg.includes('Unable to parse range')) {
+        continue;
+      }
+      throw err;
+    }
   }
-  const payload = await res.json();
+  throw lastErr ?? new Error('Failed to fetch sheet with any fallback ranges (service account)');
+}
 
-  const values: string[][] = payload.values ?? [];
-  if (values.length === 0) return null;
-
+/* ---------- Fetchers that use the above helpers ---------- */
+async function fetchFromPublicSheet(spreadsheetId: string, rangeBase: string, apiKey: string, versionPref?: string | null) {
+  const values: string[][] = (await fetchValuesWithFallbacksPublic(spreadsheetId, rangeBase, apiKey)) ?? [];
+  if (!values.length) return null;
   const headerRow = values[0].map(String);
   const dataRows = values.slice(1);
   const objects = dataRows.map((r) => mapRowToObject(headerRow, r));
-
   const chosen = chooseScripture(objects, versionPref);
   if (!chosen || !chosen.text) return null;
-
   return {
     text: chosen.text,
     reference: chosen.reference ?? '',
@@ -166,56 +226,14 @@ async function fetchFromPublicSheet(spreadsheetId: string, range: string, apiKey
   };
 }
 
-/* ---------- Fetch via Google service account (private sheet) ---------- */
-async function fetchFromServiceAccount(spreadsheetId: string, range: string, keyJson: string, versionPref?: string | null) {
-  if (!keyJson) {
-    throw new Error('Missing GOOGLE_SERVICE_ACCOUNT_KEY');
-  }
-
-  // Indirect runtime import to avoid bundler resolution during build
-  let google: any;
-  try {
-    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-    // @ts-ignore
-    const googleModule = await new Function('return import("googleapis")')();
-    google = googleModule?.google;
-    if (!google) throw new Error('googleapis module did not expose `google` export');
-  } catch (err: any) {
-    throw new Error(
-      'Failed to load googleapis at runtime. Install googleapis (pnpm add googleapis) or unset GOOGLE_SERVICE_ACCOUNT_KEY. Original error: ' +
-        String(err?.message ?? err),
-    );
-  }
-
-  const key = JSON.parse(keyJson);
-  if (!key.client_email || !key.private_key) {
-    throw new Error('Invalid GOOGLE_SERVICE_ACCOUNT_KEY JSON (missing client_email or private_key)');
-  }
-
-  const client = new google.auth.JWT({
-    email: key.client_email,
-    key: key.private_key,
-    scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
-  });
-
-  await client.authorize();
-
-  const sheets = google.sheets({ version: 'v4', auth: client });
-  const resp = await sheets.spreadsheets.values.get({
-    spreadsheetId,
-    range,
-  });
-
-  const values: string[][] = (resp.data.values as any) ?? [];
+async function fetchFromServiceAccount(spreadsheetId: string, rangeBase: string, keyJson: string, versionPref?: string | null) {
+  const values: string[][] = (await fetchValuesWithFallbacksServiceAccount(spreadsheetId, rangeBase, keyJson)) ?? [];
   if (!values.length) return null;
-
   const headerRow = values[0].map(String);
   const dataRows = values.slice(1);
   const objects = dataRows.map((r) => mapRowToObject(headerRow, r));
-
   const chosen = chooseScripture(objects, versionPref);
   if (!chosen || !chosen.text) return null;
-
   return {
     text: chosen.text,
     reference: chosen.reference ?? '',
@@ -243,14 +261,19 @@ export async function GET(req: Request) {
         return NextResponse.json(scripture, { status: 200 });
       } catch (err: any) {
         console.error('[todays-scripture] service-account fetch failed', err?.message ?? err);
-        // fall through to try public key method if available
+        // fall through to public method if available
       }
     }
 
     if (GOOGLE_API_KEY) {
-      const scripture = await fetchFromPublicSheet(SPREADSHEET_ID, SHEET_RANGE, GOOGLE_API_KEY, versionParam);
-      if (!scripture) return NextResponse.json({ error: 'No scripture found' }, { status: 404 });
-      return NextResponse.json(scripture, { status: 200 });
+      try {
+        const scripture = await fetchFromPublicSheet(SPREADSHEET_ID, SHEET_RANGE, GOOGLE_API_KEY, versionParam);
+        if (!scripture) return NextResponse.json({ error: 'No scripture found' }, { status: 404 });
+        return NextResponse.json(scripture, { status: 200 });
+      } catch (err: any) {
+        console.error('[todays-scripture] public fetch failed', err?.message ?? err);
+        return NextResponse.json({ error: 'Failed to fetch scripture', detail: String(err?.message ?? err) }, { status: 500 });
+      }
     }
 
     return NextResponse.json(
