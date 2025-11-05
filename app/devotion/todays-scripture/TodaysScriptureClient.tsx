@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 
 type Scripture = {
   text: string;
@@ -10,17 +10,31 @@ type Scripture = {
   source?: string | null;
 };
 
+const VERSIONS = ['KJV', 'NKJV', 'NIV'] as const;
+
 export default function TodaysScriptureClient({ initialScripture }: { initialScripture: Scripture | null }) {
   const [scripture, setScripture] = useState<Scripture | null>(initialScripture);
   const [loading, setLoading] = useState(false);
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  async function refresh() {
+  // initialize selected version from initialScripture.version or default to 'NIV'
+  const initialVersion = (initialScripture?.version ?? 'NIV') as string;
+  const [selectedVersion, setSelectedVersion] = useState<string>(initialVersion);
+
+  // If initialScripture later changes (unlikely in current flow), update selectedVersion
+  useEffect(() => {
+    setSelectedVersion(initialScripture?.version ?? 'NIV');
+    setScripture(initialScripture);
+  }, [initialScripture]);
+
+  async function refresh(version?: string) {
     try {
       setLoading(true);
       setError(null);
-      const res = await fetch('/api/devotion/todays-scripture', { cache: 'no-store' });
+      const ver = (version ?? selectedVersion) ?? '';
+      const url = '/api/devotion/todays-scripture' + (ver ? `?version=${encodeURIComponent(ver)}` : '');
+      const res = await fetch(url, { cache: 'no-store' });
       if (!res.ok) {
         const txt = await res.text();
         setError('Failed to refresh: ' + txt);
@@ -28,6 +42,8 @@ export default function TodaysScriptureClient({ initialScripture }: { initialScr
       }
       const data = (await res.json()) as Scripture;
       setScripture(data);
+      // if API returned a version, set it in the selector
+      if (data?.version) setSelectedVersion(data.version);
     } catch (err: any) {
       setError(err?.message ?? 'Unknown error');
     } finally {
@@ -61,7 +77,23 @@ export default function TodaysScriptureClient({ initialScripture }: { initialScr
 
   return (
     <div className="flex flex-wrap gap-3 items-center">
-      <button className="af-btn af-btn-outline" onClick={refresh} disabled={loading} aria-disabled={loading}>
+      <label className="flex items-center gap-2">
+        <span className="text-sm">Version</span>
+        <select
+          aria-label="Scripture version"
+          value={selectedVersion}
+          onChange={(e) => setSelectedVersion(e.target.value)}
+          className="px-2 py-1 border rounded"
+        >
+          {VERSIONS.map((v) => (
+            <option key={v} value={v}>
+              {v}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      <button className="af-btn af-btn-outline" onClick={() => refresh(selectedVersion)} disabled={loading} aria-disabled={loading}>
         {loading ? 'Refreshing…' : 'Refresh'}
       </button>
 
