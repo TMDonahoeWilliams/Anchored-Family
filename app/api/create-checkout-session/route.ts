@@ -46,27 +46,40 @@ export async function POST(req: NextRequest) {
     const plan = (body?.plan as string | undefined) || null;
     const priceIdFromClient = (body?.priceId as string | undefined) || null;
 
-    // Map plan to server-known price ids (server-side trust)
+    // Server-known price ids (server-side trust)
     const PRICE_MAP: Record<string, string> = {
       basic: process.env.STRIPE_PRICE_BASIC_ID || '',
       plus: process.env.STRIPE_PRICE_PLUS_ID || '',
       premium: process.env.STRIPE_PRICE_PREMIUM_ID || '',
     };
 
-    let priceId = priceIdFromClient ?? (plan ? PRICE_MAP[plan] : null);
+    // Build allowlist of valid price IDs
+    const ALLOWED_PRICE_IDS = new Set(Object.values(PRICE_MAP).filter(Boolean));
+
+    // Resolve priceId: prefer server mapping, but if client supplied one, validate it against allowlist
+    let priceId: string | null = null;
+    if (plan) {
+      priceId = PRICE_MAP[plan] || null;
+    } else if (priceIdFromClient) {
+      // Only accept client-supplied priceId if it's in our allowlist
+      if (!ALLOWED_PRICE_IDS.has(priceIdFromClient)) {
+        return NextResponse.json({ error: 'Invalid price id' }, { status: 400 });
+      }
+      priceId = priceIdFromClient;
+    }
+
     if (!priceId) {
       return NextResponse.json({ error: 'Price ID or valid plan required' }, { status: 400 });
     }
 
-    // Find or create a Stripe customer for this user. Assume you maintain a 'customers' table:
-    // customers(user_id, customer_id, created_at, updated_at)
+    // Find or create a Stripe customer for this user. Use upsert to avoid duplicate race conditions
     let customerId: string | null = null;
     const { data: existingCustomer, error: existingCustomerErr } = await supabaseAdmin
       .from('customers')
       .select('customer_id')
       .eq('user_id', userId)
       .limit(1)
-      .single();
+      .maybeSingle();
 
     if (!existingCustomerErr && existingCustomer?.customer_id) {
       customerId = existingCustomer.customer_id;
@@ -77,19 +90,23 @@ export async function POST(req: NextRequest) {
         metadata: { user_id: userId },
       });
       customerId = newCustomer.id;
-      const { error: insertErr } = await supabaseAdmin.from('customers').insert({
+      const { error: upsertErr } = await supabaseAdmin.from('customers').upsert({
         user_id: userId,
         customer_id: customerId,
-        created_at: new Date().toISOString(),
-      });
-      if (insertErr) {
-        console.warn('[create-checkout-session] failed to insert customers mapping', insertErr);
-        // not fatal for checkout creation, but log
+        updated_at: new Date().toISOString(),
+      }, { onConflict: 'customer_id' });
+      if (upsertErr) {
+        console.warn('[create-checkout-session] failed to upsert customers mapping', upsertErr);
+        // not fatal for checkout creation
       }
     }
 
-    const successUrl = (process.env.NEXT_PUBLIC_APP_URL || process.env.APP_URL || '') + '/account/settings/subscription?success=true';
-    const cancelUrl = (process.env.NEXT_PUBLIC_APP_URL || process.env.APP_URL || '') + '/account/settings/subscription?canceled=true';
+    // Build canonical server-side origin (use server env)
+    const origin = (process.env.APP_URL || process.env.NEXT_PUBLIC_APP_URL || '').replace(/\/$/, '');
+
+    // If you want the Checkout Session id included in the redirect, use the literal {CHECKOUT_SESSION_ID}
+    const successUrl = `${origin}/account/settings/subscription?success=true&session_id={CHECKOUT_SESSION_ID}`;
+    const cancelUrl = `${origin}/account/settings/subscription?canceled=true`;
 
     const session = await stripe.checkout.sessions.create({
       mode: 'subscription',
@@ -102,7 +119,8 @@ export async function POST(req: NextRequest) {
       cancel_url: cancelUrl,
     });
 
-    return NextResponse.json({ url: session.url }, { status: 200 });
+    // Return the hosted checkout URL to the client
+    return NextResponse.json({ url: session.url, id: session.id }, { status: 200 });
   } catch (err: any) {
     console.error('[create-checkout-session] error', err);
     return NextResponse.json({ error: err?.message ?? 'Internal error' }, { status: 500 });
