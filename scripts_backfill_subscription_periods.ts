@@ -38,10 +38,10 @@ async function main() {
     }
 
     try {
-      const subscription = await stripe.subscriptions.retrieve(String(subId), { expand: ['items.data.price'] });
+      const subscription = (await stripe.subscriptions.retrieve(String(subId), { expand: ['items.data.price'] })) as unknown as Stripe.Subscription;
 
-      const cps = subscription.current_period_start ?? subscription.trial_start ?? null;
-      const cpe = subscription.current_period_end ?? subscription.trial_end ?? null;
+      const cps = (subscription.current_period_start as number | null) ?? (subscription.trial_start as number | null) ?? null;
+      const cpe = (subscription.current_period_end as number | null) ?? (subscription.trial_end as number | null) ?? null;
 
       const upsertRow: any = {
         stripe_subscription_id: subId,
