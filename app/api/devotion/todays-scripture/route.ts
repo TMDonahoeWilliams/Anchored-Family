@@ -7,8 +7,9 @@ import { NextResponse } from 'next/server';
  * - Added configurable revalidate TTL via SHEET_REVALIDATE_SECONDS (default 60s).
  * - Improved header-to-column mapping (normalizes headers & synonyms).
  * - Added optional service-account (googleapis) support when GOOGLE_SERVICE_ACCOUNT_KEY is provided.
- *   This allows reading private sheets (share the sheet with the service account email).
- * - More defensive error messages and logging.
+ *   To avoid Turbopack build errors when googleapis is not installed, the service-account import
+ *   is performed indirectly at runtime using `new Function('return import("googleapis")')()`.
+ *   This prevents the bundler from statically resolving 'googleapis' during build.
  *
  * Env vars used:
  * - SPREADSHEET_ID (required)
@@ -18,7 +19,7 @@ import { NextResponse } from 'next/server';
  * - SHEET_REVALIDATE_SECONDS (optional TTL for server cache; default 60)
  *
  * If you enable service-account usage, install `googleapis` in your project:
- *   npm i googleapis
+ *   pnpm add googleapis
  */
 
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID || '';
@@ -156,8 +157,23 @@ async function fetchFromServiceAccount(spreadsheetId: string, range: string, key
     throw new Error('Missing GOOGLE_SERVICE_ACCOUNT_KEY');
   }
 
-  // dynamic import so projects that don't install googleapis won't fail at import time
-  const { google } = await import('googleapis');
+  // Use an indirect dynamic import to avoid Turbopack resolving 'googleapis' at build time.
+  // This attempts to import at runtime on the server only.
+  let google: any;
+  try {
+    // Indirect dynamic import via Function to prevent bundlers from statically analyzing import.
+    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+    // @ts-ignore
+    const googleModule = await new Function('return import("googleapis")')();
+    google = googleModule?.google;
+    if (!google) throw new Error('googleapis module did not expose `google` export');
+  } catch (err: any) {
+    // Provide a clear error hint — prefer installing googleapis or removing service account usage.
+    throw new Error(
+      'Failed to load googleapis at runtime. Install googleapis (pnpm add googleapis) or unset GOOGLE_SERVICE_ACCOUNT_KEY. Original error: ' +
+        String(err?.message ?? err),
+    );
+  }
 
   const key = JSON.parse(keyJson);
   if (!key.client_email || !key.private_key) {
