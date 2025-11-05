@@ -1,4 +1,5 @@
 import React from 'react';
+import TodaysScriptureClient from './TodaysScriptureClient';
 
 type Scripture = {
   text: string;
@@ -9,15 +10,17 @@ type Scripture = {
 };
 
 /**
- * Server-side fetch: read directly from Google Sheets values API (public/viewable sheet).
- * Uses env vars:
- *   SPREADSHEET_ID (required)
- *   SHEET_RANGE (optional, default 'Sheet1')
- *   GOOGLE_SHEETS_API_KEY (required for public sheets)
- *   SHEET_REVALIDATE_SECONDS (optional, default 60)
+ * Server-side page that fetches today's scripture directly from Google Sheets
+ * (public sheet via API key) using Next fetch with ISR (revalidate).
  *
- * This avoids calling your own /api route (and avoids localhost fallback/ECONNREFUSED).
+ * Env vars required for public-sheet mode:
+ * - SPREADSHEET_ID
+ * - GOOGLE_SHEETS_API_KEY
+ * Optional:
+ * - SHEET_RANGE (defaults to 'Sheet1')
+ * - SHEET_REVALIDATE_SECONDS (defaults to 60)
  */
+
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID || '';
 const SHEET_RANGE = process.env.SHEET_RANGE || 'Sheet1';
 const GOOGLE_API_KEY = process.env.GOOGLE_SHEETS_API_KEY || '';
@@ -158,9 +161,6 @@ export default async function Page() {
             </article>
 
             <div className="mt-6">
-              {/* Client interactivity component expected at same path (TodaysScriptureClient) */}
-              {/* If you use the component file created earlier, it will mount on the client */}
-              {/* @ts-expect-error Server component rendering client component */}
               <TodaysScriptureClient initialScripture={scripture} />
             </div>
           </>
@@ -168,7 +168,6 @@ export default async function Page() {
           <div>
             <p className="text-sm text-muted-foreground">We couldn't load today's scripture right now. Try refreshing the page.</p>
             <div className="mt-4">
-              {/* @ts-expect-error Server component rendering client component */}
               <TodaysScriptureClient initialScripture={null} />
             </div>
           </div>
