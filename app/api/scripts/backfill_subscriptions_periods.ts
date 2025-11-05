@@ -11,12 +11,12 @@ async function main() {
     process.exit(1);
   }
 
-  const stripe = new Stripe(stripeKey, { apiVersion: '2025-09-30' });
+  // Use the exact API version string expected by your stripe types
+  const stripe = new Stripe(stripeKey, { apiVersion: '2025-09-30.clover' });
   const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } });
 
   console.log('Starting subscription periods backfill...');
 
-  // Query subscriptions with null period fields
   const { data: subsToFix, error } = await supabaseAdmin
     .from('subscriptions')
     .select('stripe_subscription_id, user_id, customer_id')
@@ -51,7 +51,6 @@ async function main() {
       if (cps) upsertRow.current_period_start = new Date(Number(cps) * 1000).toISOString();
       if (cpe) upsertRow.current_period_end = new Date(Number(cpe) * 1000).toISOString();
 
-      // Keep other columns untouched; onConflict on stripe_subscription_id
       const { error: upsertErr } = await supabaseAdmin
         .from('subscriptions')
         .upsert(upsertRow, { onConflict: 'stripe_subscription_id' });
