@@ -1,6 +1,18 @@
 import Stripe from 'stripe';
 import { createClient } from '@supabase/supabase-js';
 
+/**
+ * Backfill script: update subscriptions.current_period_start and current_period_end
+ * for rows where those fields are null. Run locally / in CI with:
+ *
+ * STRIPE_SECRET_KEY=sk_live_xxx SUPABASE_URL=https://... SUPABASE_SERVICE_ROLE_KEY=ey... \
+ *   npx ts-node scripts/backfill_subscription_periods.ts
+ *
+ * Note: This file intentionally uses `any` for the Stripe response to avoid
+ * build-time type issues. This is a one-off admin script — do NOT import it
+ * from your Next.js app code.
+ */
+
 async function main() {
   const stripeKey = process.env.STRIPE_SECRET_KEY!;
   const SUPABASE_URL = process.env.SUPABASE_URL!;
@@ -11,7 +23,7 @@ async function main() {
     process.exit(1);
   }
 
-  // Use the exact API version string expected by your stripe types
+  // Use the Stripe API version your project expects
   const stripe = new Stripe(stripeKey, { apiVersion: '2025-09-30.clover' });
   const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } });
 
@@ -38,18 +50,26 @@ async function main() {
     }
 
     try {
-      const subscription = (await stripe.subscriptions.retrieve(String(subId), { expand: ['items.data.price'] })) as unknown as Stripe.Subscription;
+      // Treat the response as "any" so TS doesn't block on SDK typing differences.
+      const subscription: any = await stripe.subscriptions.retrieve(String(subId), { expand: ['items.data.price'] });
 
-      const cps = (subscription.current_period_start as number | null) ?? (subscription.trial_start as number | null) ?? null;
-      const cpe = (subscription.current_period_end as number | null) ?? (subscription.trial_end as number | null) ?? null;
+      // Stripe returns epoch seconds (number) for these fields; fall back to trial_* if needed
+      const cpsEpoch = subscription.current_period_start ?? subscription.trial_start ?? null;
+      const cpeEpoch = subscription.current_period_end ?? subscription.trial_end ?? null;
 
       const upsertRow: any = {
         stripe_subscription_id: subId,
         updated_at: new Date().toISOString(),
       };
 
-      if (cps) upsertRow.current_period_start = new Date(Number(cps) * 1000).toISOString();
-      if (cpe) upsertRow.current_period_end = new Date(Number(cpe) * 1000).toISOString();
+      if (cpsEpoch) upsertRow.current_period_start = new Date(Number(cpsEpoch) * 1000).toISOString();
+      if (cpeEpoch) upsertRow.current_period_end = new Date(Number(cpeEpoch) * 1000).toISOString();
+
+      // Only attempt the upsert if we actually have values to write
+      if (!upsertRow.current_period_start && !upsertRow.current_period_end) {
+        console.log('No period values for', subId, '- skipping update');
+        continue;
+      }
 
       const { error: upsertErr } = await supabaseAdmin
         .from('subscriptions')
@@ -58,7 +78,7 @@ async function main() {
       if (upsertErr) {
         console.error('Failed to upsert subscription periods for', subId, upsertErr);
       } else {
-        console.log('Updated periods for', subId, 'cps=', cps, 'cpe=', cpe);
+        console.log('Updated periods for', subId, 'cps=', upsertRow.current_period_start, 'cpe=', upsertRow.current_period_end);
       }
     } catch (err) {
       console.error('Error fetching subscription from Stripe for', subId, err);
