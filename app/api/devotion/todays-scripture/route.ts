@@ -3,34 +3,32 @@ import { NextResponse } from 'next/server';
 /**
  * Today's Scripture API (Google Sheets-backed)
  *
- * Two supported ways to read a sheet:
- * 1) Public or "reader" access Google Sheet using an API key (simple).
- *    - Set env: GOOGLE_SHEETS_API_KEY, SPREADSHEET_ID, SHEET_RANGE (optional).
- * 2) (Optional) Service account / googleapis approach – described below in comments.
+ * Improvements made:
+ * - Added configurable revalidate TTL via SHEET_REVALIDATE_SECONDS (default 60s).
+ * - Improved header-to-column mapping (normalizes headers & synonyms).
+ * - Added optional service-account (googleapis) support when GOOGLE_SERVICE_ACCOUNT_KEY is provided.
+ *   This allows reading private sheets (share the sheet with the service account email).
+ * - More defensive error messages and logging.
  *
- * Sheet format expected (first row = header):
- * | date       | text                        | reference  | version | source |
- * | 2025-11-05 | For God so loved the world… | John 3:16  | ESV     | MySheet|
+ * Env vars used:
+ * - SPREADSHEET_ID (required)
+ * - SHEET_RANGE (optional, defaults to 'Sheet1')
+ * - GOOGLE_SHEETS_API_KEY (optional for public sheets)
+ * - GOOGLE_SERVICE_ACCOUNT_KEY (optional JSON string for private sheets)
+ * - SHEET_REVALIDATE_SECONDS (optional TTL for server cache; default 60)
  *
- * Behavior:
- * - Fetches the sheet values (header + rows).
- * - Finds a row whose "date" column matches today's date (YYYY-MM-DD).
- * - If none match, returns the first data row as a fallback.
- * - Returns JSON: { text, reference, version?, date?, source? } or 404 if nothing found.
- *
- * Notes:
- * - If your sheet uses a different header names, set headersMapping below.
- * - For private sheets, use a service account approach (see comments).
+ * If you enable service-account usage, install `googleapis` in your project:
+ *   npm i googleapis
  */
 
-/* ---------- Config ---------- */
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID || '';
-// Range default: entire first sheet. You can set a named range like "Sheet1!A:E" or "Sheet1".
 const SHEET_RANGE = process.env.SHEET_RANGE || 'Sheet1';
 const GOOGLE_API_KEY = process.env.GOOGLE_SHEETS_API_KEY || '';
+const GOOGLE_SERVICE_ACCOUNT_KEY = process.env.GOOGLE_SERVICE_ACCOUNT_KEY || '';
+const REVALIDATE_SECONDS = Number(process.env.SHEET_REVALIDATE_SECONDS ?? '60');
 
-/* Header mapping: normalize column names to these keys (case-insensitive) */
-const headersMapping = {
+/* Header mapping: synonyms (all compared normalized, lowercase) */
+const headersMapping: Record<string, string[]> = {
   date: ['date', 'day', 'published_at'],
   text: ['text', 'scripture', 'verse', 'body'],
   reference: ['reference', 'ref'],
@@ -38,19 +36,20 @@ const headersMapping = {
   source: ['source'],
 };
 
-/* ---------- Helpers ---------- */
 function normalizeHeader(h: string) {
   return String(h ?? '').trim().toLowerCase();
 }
 
+/**
+ * Build a map from normalized header -> column index for fast lookup,
+ * then map a data row to a canonical object using headersMapping synonyms.
+ */
 function mapRowToObject(headers: string[], row: string[]) {
-  const obj: Record<string, string | null> = {};
+  const headerIndex: Record<string, number> = {};
   for (let i = 0; i < headers.length; i++) {
-    const key = normalizeHeader(headers[i]);
-    obj[key] = row[i] ?? null;
+    headerIndex[normalizeHeader(headers[i])] = i;
   }
 
-  // Find canonical keys by matching header synonyms
   const result: any = {
     date: null,
     text: null,
@@ -60,18 +59,21 @@ function mapRowToObject(headers: string[], row: string[]) {
   };
 
   for (const [canon, synonyms] of Object.entries(headersMapping)) {
+    // try synonyms first
+    let found: string | null = null;
     for (const syn of synonyms) {
-      // find matching header key
-      for (const headerKey of Object.keys(obj)) {
-        if (headerKey === syn) {
-          result[canon] = obj[headerKey];
-          break;
-        }
+      const idx = headerIndex[normalizeHeader(syn)];
+      if (typeof idx === 'number') {
+        found = row[idx] ?? null;
+        break;
       }
-      if (result[canon]) break;
     }
-    // also try exact match on canonical name if nothing found
-    if (!result[canon] && obj[canon]) result[canon] = obj[canon];
+    // fallback: exact canonical header
+    if (!found) {
+      const idx = headerIndex[canon];
+      if (typeof idx === 'number') found = row[idx] ?? null;
+    }
+    result[canon] = found ?? null;
   }
 
   return result;
@@ -94,52 +96,49 @@ async function fetchFromPublicSheet(spreadsheetId: string, range: string, apiKey
     throw new Error('Missing SPREADSHEET_ID');
   }
 
-  // Use the Sheets values endpoint
-  // Example: https://sheets.googleapis.com/v4/spreadsheets/{spreadsheetId}/values/{range}?key={API_KEY}
   const url = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(
     spreadsheetId,
   )}/values/${encodeURIComponent(range)}?key=${encodeURIComponent(apiKey)}`;
 
-  const res = await fetch(url, { next: { revalidate: 60 } }); // cache for 60s on server if you want
+  const res = await fetch(url, { next: { revalidate: REVALIDATE_SECONDS } });
   if (!res.ok) {
     const txt = await res.text().catch(() => '');
     throw new Error(`Google Sheets API error ${res.status}: ${txt}`);
   }
   const payload = await res.json();
 
-  // payload.values is an array-of-arrays. First row is header.
   const values: string[][] = payload.values ?? [];
   if (values.length === 0) return null;
 
   const headerRow = values[0].map(String);
   const dataRows = values.slice(1);
 
-  // Map rows to objects
   const objects = dataRows.map((r) => mapRowToObject(headerRow, r));
 
-  // Try to find today's row (by normalized date match YYYY-MM-DD)
   const today = todayISODate();
   const match = objects.find((o) => {
     const d = String(o.date ?? '').trim();
     if (!d) return false;
-    // Accept several formats: YYYY-MM-DD, MM/DD/YYYY, MMM D YYYY, etc.
     if (d === today) return true;
-    // try parse to Date and compare ISO
     const parsed = Date.parse(d);
     if (!isNaN(parsed)) {
       const dtIso = new Date(parsed).toISOString().slice(0, 10);
       if (dtIso === today) return true;
     }
-    // fallback: compare only date part if d contains space
-    if (d.includes(' ')) {
-      const maybe = d.split(' ')[0];
-      if (maybe === today) return true;
+    // numeric US-style like 11/05/2025
+    if (d.includes('/')) {
+      const parts = d.split('/');
+      if (parts.length === 3) {
+        const mm = parts[0].padStart(2, '0');
+        const dd = parts[1].padStart(2, '0');
+        const yyyy = parts[2].length === 2 ? `20${parts[2]}` : parts[2];
+        if (`${yyyy}-${mm}-${dd}` === today) return true;
+      }
     }
     return false;
   });
 
   const chosen = match ?? objects[0] ?? null;
-
   if (!chosen || !chosen.text) return null;
 
   return {
@@ -151,46 +150,93 @@ async function fetchFromPublicSheet(spreadsheetId: string, range: string, apiKey
   };
 }
 
-/* ---------- Optional: service account approach (private sheet) ----------
-If your sheet is private, you'll need to use OAuth2 / a service account.
-Below is a reference implementation sketch using googleapis. If you prefer
-this route, install googleapis and set GOOGLE_SERVICE_ACCOUNT_KEY (JSON string).
+/* ---------- Fetch via Google service account (private sheet) ---------- */
+async function fetchFromServiceAccount(spreadsheetId: string, range: string, keyJson: string) {
+  if (!keyJson) {
+    throw new Error('Missing GOOGLE_SERVICE_ACCOUNT_KEY');
+  }
 
-Example (not enabled by default in this file):
-  npm i googleapis
+  // dynamic import so projects that don't install googleapis won't fail at import time
+  const { google } = await import('googleapis');
 
-Then you can do:
+  const key = JSON.parse(keyJson);
+  if (!key.client_email || !key.private_key) {
+    throw new Error('Invalid GOOGLE_SERVICE_ACCOUNT_KEY JSON (missing client_email or private_key)');
+  }
 
-import { google } from 'googleapis';
-const key = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY!);
-const client = new google.auth.JWT({
-  email: key.client_email,
-  key: key.private_key,
-  scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
-});
-await client.authorize();
-const sheets = google.sheets({ version: 'v4', auth: client });
-const resp = await sheets.spreadsheets.values.get({
-  spreadsheetId: SPREADSHEET_ID,
-  range: SHEET_RANGE,
-});
+  const client = new google.auth.JWT({
+    email: key.client_email,
+    key: key.private_key,
+    scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
+  });
 
-This will return resp.data.values like the public API above.
----------------------------------------------------------------------------*/
+  await client.authorize();
+
+  const sheets = google.sheets({ version: 'v4', auth: client });
+  const resp = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range,
+  });
+
+  const values: string[][] = (resp.data.values as any) ?? [];
+  if (!values.length) return null;
+
+  const headerRow = values[0].map(String);
+  const dataRows = values.slice(1);
+  const objects = dataRows.map((r) => mapRowToObject(headerRow, r));
+
+  const today = todayISODate();
+  const match = objects.find((o) => {
+    const d = String(o.date ?? '').trim();
+    if (!d) return false;
+    if (d === today) return true;
+    const parsed = Date.parse(d);
+    if (!isNaN(parsed)) {
+      const dtIso = new Date(parsed).toISOString().slice(0, 10);
+      if (dtIso === today) return true;
+    }
+    return false;
+  });
+
+  const chosen = match ?? objects[0] ?? null;
+  if (!chosen || !chosen.text) return null;
+
+  return {
+    text: chosen.text,
+    reference: chosen.reference ?? '',
+    version: chosen.version ?? null,
+    date: chosen.date ?? null,
+    source: chosen.source ?? null,
+  };
+}
 
 /* ---------- Handler ---------- */
 export async function GET() {
   try {
-    // Prefer API key/public-sheet method when GOOGLE_SHEETS_API_KEY is set.
+    if (!SPREADSHEET_ID) {
+      return NextResponse.json({ error: 'Missing SPREADSHEET_ID env variable' }, { status: 500 });
+    }
+
+    // Prefer service account if provided (private sheet)
+    if (GOOGLE_SERVICE_ACCOUNT_KEY) {
+      try {
+        const scripture = await fetchFromServiceAccount(SPREADSHEET_ID, SHEET_RANGE, GOOGLE_SERVICE_ACCOUNT_KEY);
+        if (!scripture) return NextResponse.json({ error: 'No scripture found' }, { status: 404 });
+        return NextResponse.json(scripture, { status: 200 });
+      } catch (err: any) {
+        console.error('[todays-scripture] service-account fetch failed', err?.message ?? err);
+        // fall through to try public key method if available
+      }
+    }
+
     if (GOOGLE_API_KEY) {
       const scripture = await fetchFromPublicSheet(SPREADSHEET_ID, SHEET_RANGE, GOOGLE_API_KEY);
       if (!scripture) return NextResponse.json({ error: 'No scripture found' }, { status: 404 });
       return NextResponse.json(scripture, { status: 200 });
     }
 
-    // If no API key, return an informative error so deployers know what's missing.
     return NextResponse.json(
-      { error: 'No GOOGLE_SHEETS_API_KEY provided. Set env var SPREADSHEET_ID and GOOGLE_SHEETS_API_KEY.' },
+      { error: 'No GOOGLE_SHEETS_API_KEY or GOOGLE_SERVICE_ACCOUNT_KEY provided. Set SPREADSHEET_ID and one of the keys.' },
       { status: 500 },
     );
   } catch (err: any) {
@@ -199,7 +245,6 @@ export async function GET() {
   }
 }
 
-// Allow POST for convenience (client refresh may use GET; keep POST supported)
 export async function POST(req: Request) {
   return GET();
 }
