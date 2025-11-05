@@ -47,9 +47,7 @@ export default function TodaysScriptureClient({ initialScripture }: { initialScr
   }
 
   async function share() {
-    if (!scripture || !(navigator as any).share) {
-      return;
-    }
+    if (!scripture || !(navigator as any).share) return;
     try {
       await (navigator as any).share({
         title: `Today's Scripture — ${scripture.reference}`,
@@ -57,18 +55,13 @@ export default function TodaysScriptureClient({ initialScripture }: { initialScr
         url: window.location.href,
       });
     } catch {
-      // user cancelled or not supported
+      // user cancelled or unsupported
     }
   }
 
   return (
     <div className="flex flex-wrap gap-3 items-center">
-      <button
-        className="af-btn af-btn-outline"
-        onClick={refresh}
-        disabled={loading}
-        aria-disabled={loading}
-      >
+      <button className="af-btn af-btn-outline" onClick={refresh} disabled={loading} aria-disabled={loading}>
         {loading ? 'Refreshing…' : 'Refresh'}
       </button>
 
