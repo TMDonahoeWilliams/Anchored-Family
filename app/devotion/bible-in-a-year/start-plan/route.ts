@@ -4,8 +4,8 @@ import { createClient } from '@supabase/supabase-js';
 /**
  * Defensive start-plan route:
  * - Uses SUPABASE_SERVICE_ROLE_KEY to insert into bible_year_selection.
- * - If the insert fails due to missing columns (day_index, household_id, reminder_time),
- *   retries with those fields removed or remapped (day_index -> current_day).
+ * - If the insert fails due to missing columns (day_index, household_id, reminder_time, start_date),
+ *   retries with those fields removed or remapped (day_index -> current_day; started_at -> start_date mapping handled if needed).
  */
 
 const SUPABASE_URL = process.env.SUPABASE_URL ?? '';
@@ -40,11 +40,22 @@ async function resilientInsert(supabase: any, table: string, row: any) {
 
   const msg = String(result.error?.message ?? result.error?.details ?? result.error ?? '');
   // If missing any of these optional columns, remove or remap and retry
-  if (isMissingColumnError(msg, ['day_index', 'household_id', 'reminder_time'])) {
+  if (isMissingColumnError(msg, ['day_index', 'household_id', 'reminder_time', 'start_date'])) {
     // remap day_index -> current_day if present
     if ('day_index' in attemptRow) {
       attemptRow.current_day = attemptRow.day_index;
       delete attemptRow.day_index;
+    }
+    // If start_date missing but started_at present, map started_at -> start_date (date part)
+    if ('started_at' in attemptRow && !('start_date' in attemptRow)) {
+      try {
+        const d = new Date(attemptRow.started_at);
+        if (!isNaN(d.getTime())) {
+          attemptRow.start_date = d.toISOString().slice(0, 10); // YYYY-MM-DD
+        }
+      } catch {
+        // ignore parse errors
+      }
     }
     // remove household_id if present
     if ('household_id' in attemptRow) {
@@ -53,6 +64,10 @@ async function resilientInsert(supabase: any, table: string, row: any) {
     // remove reminder_time if present
     if ('reminder_time' in attemptRow) {
       delete attemptRow.reminder_time;
+    }
+    // if start_date still present and missing column caused error, remove it
+    if ('start_date' in attemptRow) {
+      delete attemptRow.start_date;
     }
 
     result = await tryInsert(attemptRow);
@@ -74,6 +89,8 @@ export async function POST(req: Request) {
     const planKey: string = (body?.planKey as string) ?? 'one-year-standard';
     const householdId: string | undefined = body?.householdId; // optional
     const reminderTime: string | undefined = body?.reminderTime; // optional, expected like '08:00:00' or ISO time
+    // optional explicit start_date (YYYY-MM-DD) – if client provides one
+    const startDate: string | undefined = body?.startDate;
 
     if (!userId || typeof userId !== 'string') {
       return NextResponse.json({ error: 'Missing or invalid userId in request body' }, { status: 400 });
@@ -92,9 +109,16 @@ export async function POST(req: Request) {
       progress: {}, // jsonb
     };
 
-    // only include optional fields if provided
+    // include optional fields if provided
     if (householdId) toInsert.household_id = householdId;
     if (reminderTime) toInsert.reminder_time = reminderTime;
+    // include start_date as YYYY-MM-DD if provided or leave it to remapping
+    if (startDate) {
+      toInsert.start_date = startDate;
+    } else {
+      // add a default start_date value (date part of started_at)
+      toInsert.start_date = new Date().toISOString().slice(0, 10);
+    }
 
     const { data, error } = await resilientInsert(supabase, 'bible_year_selection', toInsert);
 
