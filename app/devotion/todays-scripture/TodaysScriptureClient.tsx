@@ -75,43 +75,64 @@ export default function TodaysScriptureClient({ initialScripture }: Props) {
     }
   }
 
+  // Show the "Loaded (KJV)" badge when the loaded scripture (or the selected version if scripture lacks version)
+  const effectiveVersion = scripture?.version ?? selectedVersion;
+  const showDefaultKJVBadge = !!scripture && effectiveVersion?.toUpperCase() === 'KJV';
+
   return (
-    <div className="flex flex-wrap gap-3 items-center">
-      <label className="flex items-center gap-2">
-        <span className="text-sm">Version</span>
-        <select
-          aria-label="Scripture version"
-          value={selectedVersion}
-          onChange={(e) => setSelectedVersion(e.target.value)}
-          className="px-2 py-1 border rounded"
-        >
-          {VERSIONS.map((v) => (
-            <option key={v} value={v}>
-              {v}
-            </option>
-          ))}
-        </select>
-      </label>
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-wrap gap-3 items-center">
+        <label className="flex items-center gap-2">
+          <span className="text-sm">Version</span>
+          <select
+            aria-label="Scripture version"
+            value={selectedVersion}
+            onChange={(e) => setSelectedVersion(e.target.value)}
+            className="px-2 py-1 border rounded"
+          >
+            {VERSIONS.map((v) => (
+              <option key={v} value={v}>
+                {v}
+              </option>
+            ))}
+          </select>
+        </label>
 
-      <button className="af-btn af-btn-outline" onClick={() => refresh(selectedVersion)} disabled={loading} aria-disabled={loading}>
-        {loading ? 'Refreshing…' : 'Refresh'}
-      </button>
+        <button className="af-btn af-btn-outline" onClick={() => refresh(selectedVersion)} disabled={loading} aria-disabled={loading}>
+          {loading ? 'Refreshing…' : 'Refresh'}
+        </button>
 
-      <button className="af-btn af-btn-outline" onClick={copyText} disabled={!scripture}>
-        {copied ? 'Copied' : 'Copy'}
-      </button>
+        <button className="af-btn af-btn-outline" onClick={copyText} disabled={!scripture}>
+          {copied ? 'Copied' : 'Copy'}
+        </button>
 
-      <button className="af-btn af-btn-primary" onClick={share} disabled={!scripture || !(navigator as any).share}>
-        Share
-      </button>
+        <button className="af-btn af-btn-primary" onClick={share} disabled={!scripture || !(navigator as any).share}>
+          Share
+        </button>
 
-      {error ? <p className="text-sm text-red-600 mt-2">{error}</p> : null}
+        {error ? <p className="text-sm text-red-600 mt-2">{error}</p> : null}
+
+        {/* Badge area */}
+        <div className="ml-auto flex items-center">
+          {showDefaultKJVBadge ? (
+            <span
+              className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 border border-green-200"
+              aria-label="Loaded KJV"
+              title="Loaded (KJV)"
+            >
+              Loaded (KJV)
+            </span>
+          ) : null}
+        </div>
+      </div>
 
       {/* Display scripture if present */}
       {scripture ? (
-        <div className="mt-4 p-4 border rounded bg-white shadow-sm w-full">
+        <div className="mt-2 p-4 border rounded bg-white shadow-sm w-full">
           <p className="whitespace-pre-wrap">{scripture.text}</p>
-          <p className="mt-2 text-sm text-gray-600">— {scripture.reference ?? ''} {scripture.version ? `(${scripture.version})` : ''}</p>
+          <p className="mt-2 text-sm text-gray-600">
+            — {scripture.reference ?? ''} {scripture.version ? `(${scripture.version})` : ''}
+          </p>
         </div>
       ) : (
         <p className="mt-4 text-sm text-gray-600">We couldn't load today's scripture right now. Try refreshing the page.</p>
