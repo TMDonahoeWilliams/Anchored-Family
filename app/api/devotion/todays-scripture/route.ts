@@ -1,43 +1,32 @@
 import { NextResponse } from 'next/server';
 
 /**
- * Today's Scripture API (Google Sheets-backed)
- *
- * Behavior updated per request:
- * - Looks for today's date specifically in column A (index 0) of the sheet.
- * - Finds the requested version by matching the header row (e.g. "KJV", "NKJV", "NIV").
- *   The header row is expected to be the first row of the values returned.
- * - Returns the cell under the version-column for the row whose column-A date matches today.
- * - For reference, the handler will:
- *   - prefer using a dedicated "reference" (or "ref") header column if present, or
- *   - fall back to leaving reference empty.
- *
- * Query params:
- * - version=KJV|NKJV|NIV (optional) — if omitted, the handler will pick the first version-like column it finds.
+ * Today's Scripture API (Airtable-backed)
  *
  * Env vars:
- * - SPREADSHEET_ID (required)
- * - SHEET_RANGE (optional, defaults to 'Sheet1!A:Z' recommended)
- * - GOOGLE_SHEETS_API_KEY (optional for public sheets)
- * - GOOGLE_SERVICE_ACCOUNT_KEY or GOOGLE_SERVICE_ACCOUNT_KEY_B64 (optional for private sheets)
- * - SHEET_REVALIDATE_SECONDS (optional TTL; default 60)
+ * - AIRTABLE_API_KEY (required)
+ * - AIRTABLE_BASE_ID (required)
+ * - AIRTABLE_TABLE (optional, default: "Sheet4")
+ * - AIRTABLE_REVALIDATE_SECONDS (optional, default: 60)
+ *
+ * Behavior:
+ * - Fetches records from Airtable table (pages through results).
+ * - Looks for a record whose Date field matches today's date (accepts multiple formats).
+ * - Selects the scripture text from the requested version column (query ?version=KJV|NKJV|NIV)
+ *   or attempts to autodetect the version column (KJV, NKJV, NIV, or first matching field).
+ * - Returns JSON: { text, reference, version?, date?, source? } or 404 if nothing found.
  *
  * Notes:
- * - If your tab name or range contains spaces/special chars, set SHEET_RANGE to a proper A1 range
- *   (e.g. "'Today's Scripture'!A:Z" or "Sheet1!A:Z"). The handler will also try sensible fallbacks.
+ * - This route is intended to replace the previous Google Sheets logic.
+ * - Client code should call /api/devotion/todays-scripture?version=NIV (or KJV/NKJV) as before.
  */
 
-const SPREADSHEET_ID = process.env.SPREADSHEET_ID || '';
-const SHEET_RANGE = process.env.SHEET_RANGE || 'Sheet1!A:Z';
-const GOOGLE_API_KEY = process.env.GOOGLE_SHEETS_API_KEY || '';
-const GOOGLE_SERVICE_ACCOUNT_KEY =
-  process.env.GOOGLE_SERVICE_ACCOUNT_KEY ||
-  (process.env.GOOGLE_SERVICE_ACCOUNT_KEY_B64 ? Buffer.from(process.env.GOOGLE_SERVICE_ACCOUNT_KEY_B64, 'base64').toString('utf8') : '');
-const REVALIDATE_SECONDS = Number(process.env.SHEET_REVALIDATE_SECONDS ?? '60');
+const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY || '';
+const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID || '';
+const AIRTABLE_TABLE = process.env.AIRTABLE_TABLE || 'Sheet4';
+const REVALIDATE_SECONDS = Number(process.env.AIRTABLE_REVALIDATE_SECONDS ?? process.env.SHEET_REVALIDATE_SECONDS ?? '60');
 
-function normalize(s: string | null | undefined) {
-  return String(s ?? '').trim().toLowerCase();
-}
+/* ---------- Helpers ---------- */
 
 function todayISODate() {
   const d = new Date();
@@ -47,17 +36,16 @@ function todayISODate() {
   return `${yyyy}-${mm}-${dd}`;
 }
 
-/**
- * Parse a date-like value from a cell (supports YYYY-MM-DD, MM/DD/YYYY, JS Date strings)
- * Returns ISO YYYY-MM-DD or null.
- */
+/** Try to parse common date cell formats into YYYY-MM-DD or return null */
 function parseCellDateToISO(cell: any): string | null {
   if (cell == null) return null;
   const s = String(cell).trim();
   if (!s) return null;
-  // If already YYYY-MM-DD
+  // 1) ISO-like YYYY-MM-DD or full ISO date
   if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-  // Try MM/DD/YYYY or M/D/YYYY
+  const parsed = Date.parse(s);
+  if (!isNaN(parsed)) return new Date(parsed).toISOString().slice(0, 10);
+  // 2) MM/DD/YYYY or M/D/YYYY
   if (/^\d{1,2}\/\d{1,2}\/\d{2,4}$/.test(s)) {
     const parts = s.split('/');
     let mm = parts[0].padStart(2, '0');
@@ -66,190 +54,211 @@ function parseCellDateToISO(cell: any): string | null {
     if (yyyy.length === 2) yyyy = `20${yyyy}`;
     return `${yyyy}-${mm}-${dd}`;
   }
-  // Try Date.parse
-  const parsed = Date.parse(s);
-  if (!isNaN(parsed)) return new Date(parsed).toISOString().slice(0, 10);
   return null;
 }
 
-/* ---------- Helpers to find header indices ---------- */
-function findVersionHeaderIndex(headers: string[], versionPref?: string | null) {
-  const normalizedHeaders = headers.map((h) => normalize(h));
-  const vPref = versionPref ? normalize(versionPref) : null;
+/** Fetch all records from an Airtable table (will page through results). */
+async function fetchAllAirtableRecords(baseId: string, table: string, apiKey: string) {
+  if (!apiKey) throw new Error('Missing AIRTABLE_API_KEY');
+  if (!baseId) throw new Error('Missing AIRTABLE_BASE_ID');
 
-  // If explicit version pref, try exact match then includes.
-  if (vPref) {
-    for (let i = 0; i < normalizedHeaders.length; i++) {
-      if (normalizedHeaders[i] === vPref) return i;
+  const endpoint = `https://api.airtable.com/v0/${encodeURIComponent(baseId)}/${encodeURIComponent(table)}`;
+  const records: any[] = [];
+  let offset: string | undefined = undefined;
+
+  // Loop to page through results (Airtable returns up to 100 records per page)
+  for (let i = 0; i < 50; i++) {
+    const url = new URL(endpoint);
+    url.searchParams.set('pageSize', '100');
+    if (offset) url.searchParams.set('offset', offset);
+    // optionally you could set a view or maxRecords here
+    const res = await fetch(url.toString(), {
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      // Cache control for Next.js ISR
+      // This instructs Next to revalidate the response of this fetch server-side.
+      next: { revalidate: REVALIDATE_SECONDS },
+    });
+
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      throw new Error(`Airtable API error ${res.status}: ${txt}`);
     }
-    for (let i = 0; i < normalizedHeaders.length; i++) {
-      if (normalizedHeaders[i].includes(vPref)) return i;
+
+    const payload = await res.json();
+    if (Array.isArray(payload.records)) {
+      records.push(...payload.records);
     }
+    offset = payload.offset;
+    if (!offset) break;
   }
 
-  // If no pref or not found, heuristics: pick first header that's not 'date'/'reference'/'ref'/'source'/'version'
-  const forbidden = new Set(['date', 'reference', 'ref', 'version', 'source']);
-  for (let i = 0; i < normalizedHeaders.length; i++) {
-    if (!forbidden.has(normalizedHeaders[i]) && normalizedHeaders[i]) return i;
-  }
-
-  // fallback: second column (index 1) if exists
-  if (headers.length > 1) return 1;
-  return 0;
+  return records;
 }
 
-function findReferenceHeaderIndex(headers: string[]) {
-  const normalizedHeaders = headers.map((h) => normalize(h));
-  for (let i = 0; i < normalizedHeaders.length; i++) {
-    if (['reference', 'ref'].includes(normalizedHeaders[i])) return i;
-  }
-  return -1;
-}
-
-/* ---------- Google Sheets fetchers (public + service account) ---------- */
-/* Note: we re-use a focused approach: get values array (2D), assume headerRow = values[0] */
-async function fetchValuesPublic(spreadsheetId: string, range: string) {
-  if (!GOOGLE_API_KEY) throw new Error('Missing GOOGLE_SHEETS_API_KEY');
-  const url = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(
-    spreadsheetId,
-  )}/values/${encodeURIComponent(range)}?key=${encodeURIComponent(GOOGLE_API_KEY)}`;
-  const res = await fetch(url, { next: { revalidate: REVALIDATE_SECONDS } });
-  if (!res.ok) {
-    const txt = await res.text().catch(() => '');
-    throw new Error(`Google Sheets API error ${res.status}: ${txt}`);
-  }
-  const payload = await res.json();
-  return (payload.values as string[][]) ?? [];
-}
-
-async function fetchValuesServiceAccount(spreadsheetId: string, range: string, keyJson: string) {
-  // dynamic import of googleapis to avoid bundler issues when not installed
-  let google: any;
-  try {
-    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-    // @ts-ignore
-    const googleModule = await new Function('return import("googleapis")')();
-    google = googleModule?.google;
-    if (!google) throw new Error('googleapis module missing');
-  } catch (err: any) {
-    throw new Error('Failed to load googleapis at runtime: ' + String(err?.message ?? err));
-  }
-
-  const key = JSON.parse(keyJson);
-  const client = new google.auth.JWT({
-    email: key.client_email,
-    key: key.private_key,
-    scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
-  });
-  await client.authorize();
-  const sheets = google.sheets({ version: 'v4', auth: client });
-  const resp = await sheets.spreadsheets.values.get({
-    spreadsheetId,
-    range,
-  });
-  return (resp.data.values as string[][]) ?? [];
-}
-
-/* ---------- Core logic: read values, find row by column-A date, pick version column ---------- */
-async function pickScriptureFromValues(values: string[][], versionPref?: string | null) {
-  if (!values || values.length === 0) return null;
-  const headerRow = values[0].map(String);
-  const dataRows = values.slice(1);
-  if (dataRows.length === 0) return null;
-
+/** Choose the scripture record and version field based on date and version preference */
+function chooseScriptureFromRecords(records: any[], versionPref?: string | null) {
+  if (!records || records.length === 0) return null;
   const today = todayISODate();
+  const vPref = versionPref ? String(versionPref).trim().toUpperCase() : null;
 
-  // find reference column if any
-  const refIdx = findReferenceHeaderIndex(headerRow);
+  // Normalize candidate version field names in a record
+  const versionFieldCandidates = (fields: Record<string, any>) =>
+    Object.keys(fields).filter((k) => !!k).map((k) => k);
 
-  // find version column index using header row and requested version
-  const versionIdx = findVersionHeaderIndex(headerRow, versionPref);
+  // Helper to get value for a version, given fields object
+  const valueForVersion = (fields: Record<string, any>, v: string) => {
+    // Try exact match first
+    for (const key of Object.keys(fields)) {
+      if (key.trim().toUpperCase() === v) return fields[key];
+    }
+    // Try includes (e.g. "NIV (Study)" or "NIV Reference")
+    for (const key of Object.keys(fields)) {
+      if (key.trim().toUpperCase().includes(v)) return fields[key];
+    }
+    return null;
+  };
 
-  // look for a row that has today's date in column A (index 0)
-  for (const row of dataRows) {
-    const cellDateIso = parseCellDateToISO(row[0]);
-    if (cellDateIso && cellDateIso === today) {
-      const text = row[versionIdx] ?? null;
-      const reference = refIdx >= 0 ? (row[refIdx] ?? '') : '';
-      if (text && String(text).trim()) {
+  // 1) If versionPref: try find record with date == today and version cell present
+  if (vPref) {
+    for (const r of records) {
+      const f = r.fields ?? {};
+      const cellDate = parseCellDateToISO(f.Date ?? f.date ?? f.DateString ?? null);
+      if (cellDate === today) {
+        const txt = valueForVersion(f, vPref);
+        if (txt && String(txt).trim()) {
+          return {
+            text: String(txt),
+            reference: String(f.Reference ?? f.reference ?? '') || '',
+            version: getReturnedVersionName(f, vPref),
+            date: f.Date ?? null,
+            source: 'Airtable',
+          };
+        }
+      }
+    }
+  }
+
+  // 2) Try any record with today's date, pick autodetected version column (KJV/NKJV/NIV preferred)
+  for (const r of records) {
+    const f = r.fields ?? {};
+    const cellDate = parseCellDateToISO(f.Date ?? f.date ?? f.DateString ?? null);
+    if (cellDate === today) {
+      // prefer exact version fields in this order if present
+      const prefs = ['KJV', 'NKJV', 'NIV'];
+      for (const pv of prefs) {
+        const val = valueForVersion(f, pv);
+        if (val && String(val).trim()) {
+          return {
+            text: String(val),
+            reference: String(f.Reference ?? f.reference ?? '') || '',
+            version: getReturnedVersionName(f, pv),
+            date: f.Date ?? null,
+            source: 'Airtable',
+          };
+        }
+      }
+      // fallback: pick first non-date, non-reference field that seems textual
+      for (const key of versionFieldCandidates(f)) {
+        const normalized = key.trim().toLowerCase();
+        if (['date', 'reference', 'ref', 'id', 'createdtime'].includes(normalized)) continue;
+        const val = f[key];
+        if (val && String(val).trim()) {
+          return {
+            text: String(val),
+            reference: String(f.Reference ?? f.reference ?? '') || '',
+            version: key,
+            date: f.Date ?? null,
+            source: 'Airtable',
+          };
+        }
+      }
+    }
+  }
+
+  // 3) If versionPref present, try any record that has that version column
+  if (vPref) {
+    for (const r of records) {
+      const f = r.fields ?? {};
+      const txt = valueForVersion(f, vPref);
+      if (txt && String(txt).trim()) {
         return {
-          text: String(text),
-          reference: String(reference ?? '').trim(),
-          version: headerRow[versionIdx] ?? null,
-          date: row[0] ?? null,
-          source: 'Google Sheets',
+          text: String(txt),
+          reference: String(f.Reference ?? f.reference ?? '') || '',
+          version: getReturnedVersionName(f, vPref),
+          date: f.Date ?? null,
+          source: 'Airtable (fallback by version)',
         };
       }
-      // if the version cell is empty for today's row, continue searching other rows (or fallback)
     }
   }
 
-  // If no exact today match, fallback strategies:
-  // 1) If version column exists, find any row that has a non-empty cell in that version column (prefer most recent / first)
-  for (const row of dataRows) {
-    const text = row[versionIdx] ?? null;
-    if (text && String(text).trim()) {
-      const reference = refIdx >= 0 ? (row[refIdx] ?? '') : '';
-      return {
-        text: String(text),
-        reference: String(reference ?? '').trim(),
-        version: headerRow[versionIdx] ?? null,
-        date: row[0] ?? null,
-        source: 'Google Sheets (fallback)',
-      };
+  // 4) Fallback: first record with any non-empty text field (excluding date/ref)
+  for (const r of records) {
+    const f = r.fields ?? {};
+    for (const key of versionFieldCandidates(f)) {
+      const normalized = key.trim().toLowerCase();
+      if (['date', 'reference', 'ref', 'id', 'createdtime'].includes(normalized)) continue;
+      const val = f[key];
+      if (val && String(val).trim()) {
+        return {
+          text: String(val),
+          reference: String(f.Reference ?? f.reference ?? '') || '',
+          version: key,
+          date: f.Date ?? null,
+          source: 'Airtable (fallback first)',
+        };
+      }
     }
   }
 
-  // 2) As last resort return null
   return null;
+}
+
+/** Helper to return the 'version' name we actually used (if we matched by token) */
+function getReturnedVersionName(fields: Record<string, any>, vPref: string) {
+  if (!vPref) return null;
+  for (const key of Object.keys(fields)) {
+    if (key.trim().toUpperCase() === vPref) return key;
+  }
+  for (const key of Object.keys(fields)) {
+    if (key.trim().toUpperCase().includes(vPref)) return key;
+  }
+  return vPref;
 }
 
 /* ---------- Handler ---------- */
+
 export async function GET(req: Request) {
   try {
-    if (!SPREADSHEET_ID) {
-      return NextResponse.json({ error: 'Missing SPREADSHEET_ID env variable' }, { status: 500 });
+    if (!AIRTABLE_API_KEY || !AIRTABLE_BASE_ID) {
+      return NextResponse.json(
+        { error: 'Missing AIRTABLE_API_KEY or AIRTABLE_BASE_ID env variables' },
+        { status: 500 },
+      );
     }
 
     const url = new URL(req.url);
     const versionParam = url.searchParams.get('version')?.trim() ?? null;
 
-    // Try service account first (private sheets)
-    if (GOOGLE_SERVICE_ACCOUNT_KEY) {
-      try {
-        const values = await fetchValuesServiceAccount(SPREADSHEET_ID, SHEET_RANGE, GOOGLE_SERVICE_ACCOUNT_KEY);
-        const scripture = await pickScriptureFromValues(values, versionParam);
-        if (!scripture) return NextResponse.json({ error: 'No scripture found' }, { status: 404 });
-        return NextResponse.json(scripture, { status: 200 });
-      } catch (err: any) {
-        console.error('[todays-scripture] service-account fetch failed', err?.message ?? err);
-        // fall through to public method
-      }
+    // Fetch records
+    const records = await fetchAllAirtableRecords(AIRTABLE_BASE_ID, AIRTABLE_TABLE, AIRTABLE_API_KEY);
+    const scripture = chooseScriptureFromRecords(records, versionParam);
+
+    if (!scripture) {
+      return NextResponse.json({ error: 'No scripture found' }, { status: 404 });
     }
 
-    // Public-sheet fallback (API key)
-    if (GOOGLE_API_KEY) {
-      try {
-        const values = await fetchValuesPublic(SPREADSHEET_ID, SHEET_RANGE);
-        const scripture = await pickScriptureFromValues(values, versionParam);
-        if (!scripture) return NextResponse.json({ error: 'No scripture found' }, { status: 404 });
-        return NextResponse.json(scripture, { status: 200 });
-      } catch (err: any) {
-        console.error('[todays-scripture] public fetch failed', err?.message ?? err);
-        return NextResponse.json({ error: 'Failed to fetch scripture', detail: String(err?.message ?? err) }, { status: 500 });
-      }
-    }
-
-    return NextResponse.json(
-      { error: 'No GOOGLE_SHEETS_API_KEY or GOOGLE_SERVICE_ACCOUNT_KEY provided. Set SPREADSHEET_ID and one of the keys.' },
-      { status: 500 },
-    );
+    return NextResponse.json(scripture, { status: 200 });
   } catch (err: any) {
-    console.error('[todays-scripture] error fetching sheet', err?.message ?? err);
+    console.error('[todays-scripture] error fetching from Airtable', err?.message ?? err);
     return NextResponse.json({ error: 'Failed to fetch scripture', detail: String(err?.message ?? err) }, { status: 500 });
   }
 }
 
 export async function POST(req: Request) {
+  // Support POST the same as GET for convenience
   return GET(req);
 }
