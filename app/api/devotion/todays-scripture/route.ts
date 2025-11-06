@@ -1,105 +1,85 @@
 import { NextResponse } from 'next/server';
 
 /**
- * Today's Scripture API (Airtable-backed)
+ * Today's Scripture API (Airtable-backed) — timezone-aware matching + debug output
  *
- * This version queries Airtable for the specific record whose Date equals today's date
- * using an Airtable server-side filter (filterByFormula). If the Date field in Airtable
- * is a proper Date type, the DATETIME_FORMAT(...,'YYYY-MM-DD') approach will match reliably.
+ * Tries server-side filterByFormula for both UTC and local date strings, then falls back
+ * to paging through records and checking parsed dates against both UTC and local.
  *
- * Env vars required:
+ * Env:
  * - AIRTABLE_API_KEY
  * - AIRTABLE_BASE_ID
- * Optional:
- * - AIRTABLE_TABLE (defaults to 'Sheet4')
- * - AIRTABLE_VIEW (optional view name to scope the query)
- * - AIRTABLE_REVALIDATE_SECONDS (default 60)
+ * - AIRTABLE_TABLE (defaults to 'Scripture' or 'Sheet4')
+ * - AIRTABLE_VIEW (optional)
+ * - AIRTABLE_REVALIDATE_SECONDS (optional)
  *
- * Query param:
- * - version=KJV|NKJV|NIV (optional). If provided, the API will prefer that column.
- *
- * Behavior:
- * - Try a filtered Airtable request for today's date (server-side).
- * - If that returns no matching record (or Date is a text field), fall back to fetching a page
- *   of records and searching client-side (older fallback behavior).
+ * Query params:
+ * - version=KJV|NKJV|NIV
+ * - debug=1 (optional) — include debug details in the JSON response
  */
 
 const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY || '';
 const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID || '';
-const AIRTABLE_TABLE = process.env.AIRTABLE_TABLE || 'Sheet4';
-const AIRTABLE_VIEW = process.env.AIRTABLE_VIEW || ''; // optional
+const AIRTABLE_TABLE = process.env.AIRTABLE_TABLE || 'Scripture';
+const AIRTABLE_VIEW = process.env.AIRTABLE_VIEW || '';
 const REVALIDATE_SECONDS = Number(process.env.AIRTABLE_REVALIDATE_SECONDS ?? process.env.SHEET_REVALIDATE_SECONDS ?? '60');
 
-function todayISODate() {
+function todayUTCISO() {
   const d = new Date();
-  const yyyy = d.getUTCFullYear();
-  const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
-  const dd = String(d.getUTCDate()).padStart(2, '0');
-  return `${yyyy}-${mm}-${dd}`;
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
 }
 
-/** Safe fetch wrapper that throws with readable message */
+function todayLocalISO() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 async function safeFetch(url: string, init: RequestInit) {
+  console.log('[todays-scripture] Airtable request URL:', url);
   const res = await fetch(url, init);
+  const text = await res.text().catch(() => '');
   if (!res.ok) {
-    const txt = await res.text().catch(() => '');
-    throw new Error(`Airtable API error ${res.status}: ${txt}`);
+    const err: any = new Error(`Airtable API error ${res.status}: ${text || res.statusText}`);
+    err.status = res.status;
+    err.body = text;
+    err.url = url;
+    throw err;
   }
-  return res;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return {};
+  }
 }
 
-/** Try to fetch records filtered by today's date using Airtable formula on a Date field */
-async function fetchRecordByDateFilter(baseId: string, table: string, apiKey: string, dateIso: string) {
-  // Use DATETIME_FORMAT({Date},'YYYY-MM-DD') = '2025-11-06' to match date part only.
-  // This requires the Date column to be an Airtable Date type. If Date is text, this may not match.
-  const formula = `DATETIME_FORMAT({Date},'YYYY-MM-DD')='${dateIso}'`;
+async function fetchWithFormula(baseId: string, table: string, apiKey: string, formula: string) {
   const params = new URLSearchParams();
   params.set('pageSize', '1');
   params.set('filterByFormula', formula);
   if (AIRTABLE_VIEW) params.set('view', AIRTABLE_VIEW);
-
   const endpoint = `https://api.airtable.com/v0/${encodeURIComponent(baseId)}/${encodeURIComponent(table)}?${params.toString()}`;
-
-  const res = await safeFetch(endpoint, {
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
+  return await safeFetch(endpoint, {
+    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
     next: { revalidate: REVALIDATE_SECONDS },
   });
-
-  const payload = await res.json();
-  return (payload.records ?? []) as any[];
 }
 
-/** Fallback: fetch a page of records and let server-side logic find today's row (for text-date fields) */
-async function fetchRecordsPage(baseId: string, table: string, apiKey: string, maxRecords = 200) {
+async function fetchPage(baseId: string, table: string, apiKey: string, pageSize = 100) {
   const params = new URLSearchParams();
-  params.set('pageSize', String(Math.min(100, maxRecords)));
+  params.set('pageSize', String(Math.min(100, pageSize)));
   if (AIRTABLE_VIEW) params.set('view', AIRTABLE_VIEW);
-  // We don't set filterByFormula here; we pull records and search locally.
   const endpoint = `https://api.airtable.com/v0/${encodeURIComponent(baseId)}/${encodeURIComponent(table)}?${params.toString()}`;
-
-  const res = await safeFetch(endpoint, {
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
+  return await safeFetch(endpoint, {
+    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
     next: { revalidate: REVALIDATE_SECONDS },
   });
-
-  const payload = await res.json();
-  return (payload.records ?? []) as any[];
 }
 
-/** Parse common date formats into YYYY-MM-DD or return null */
 function parseCellDateToISO(cell: any): string | null {
   if (cell == null) return null;
   const s = String(cell).trim();
   if (!s) return null;
-  // Already YYYY-MM-DD
   if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-  // MM/DD/YYYY or M/D/YYYY
   if (/^\d{1,2}\/\d{1,2}\/\d{2,4}$/.test(s)) {
     const parts = s.split('/');
     let mm = parts[0].padStart(2, '0');
@@ -108,13 +88,11 @@ function parseCellDateToISO(cell: any): string | null {
     if (yyyy.length === 2) yyyy = `20${yyyy}`;
     return `${yyyy}-${mm}-${dd}`;
   }
-  // Try Date.parse
   const parsed = Date.parse(s);
   if (!isNaN(parsed)) return new Date(parsed).toISOString().slice(0, 10);
   return null;
 }
 
-/** Select text from fields given a version preference or heuristics */
 function selectTextFromFields(fields: Record<string, any>, versionPref?: string | null) {
   const vPref = versionPref ? String(versionPref).trim().toUpperCase() : null;
 
@@ -133,21 +111,18 @@ function selectTextFromFields(fields: Record<string, any>, versionPref?: string 
     if (txt && String(txt).trim()) return { text: String(txt), version: getReturnedVersionName(fields, vPref) };
   }
 
-  // Prefer KJV/NKJV/NIV
   const prefs = ['KJV', 'NKJV', 'NIV'];
   for (const p of prefs) {
     const t = valueForVersion(p);
     if (t && String(t).trim()) return { text: String(t), version: getReturnedVersionName(fields, p) };
   }
 
-  // Fallback: first textual field that's not Date/Reference/etc.
   for (const key of Object.keys(fields)) {
     const normalized = key.trim().toLowerCase();
     if (['date', 'reference', 'ref', 'id', 'createdtime'].includes(normalized)) continue;
     const val = fields[key];
     if (val && String(val).trim()) return { text: String(val), version: key };
   }
-
   return null;
 }
 
@@ -169,66 +144,77 @@ export async function GET(req: Request) {
     }
 
     const url = new URL(req.url);
+    const debug = url.searchParams.get('debug') === '1';
     const versionParam = url.searchParams.get('version')?.trim() ?? null;
-    const today = todayISODate();
 
-    // 1) Try server-side filterByFormula on Date (best case: Date is a Date type in Airtable)
+    const utcDate = todayUTCISO();
+    const localDate = todayLocalISO();
+
+    // Try server-side filter with UTC date, then local date
+    const triedFormulas: string[] = [];
     try {
-      const filtered = await fetchRecordByDateFilter(AIRTABLE_BASE_ID, AIRTABLE_TABLE, AIRTABLE_API_KEY, today);
-      if (filtered && filtered.length > 0) {
-        const rec = filtered[0];
+      // formula expects single quotes around date literal
+      const formulaUTC = `DATETIME_FORMAT({Date},'YYYY-MM-DD')='${utcDate}'`;
+      triedFormulas.push(formulaUTC);
+      const resUTC = await fetchWithFormula(AIRTABLE_BASE_ID, AIRTABLE_TABLE, AIRTABLE_API_KEY, formulaUTC);
+      if (Array.isArray(resUTC.records) && resUTC.records.length > 0) {
+        const rec = resUTC.records[0];
         const fields = rec.fields ?? {};
-        const selected = selectTextFromFields(fields, versionParam);
-        if (selected?.text) {
-          return NextResponse.json(
-            {
-              text: selected.text,
-              reference: String(fields.Reference ?? fields.reference ?? '') || '',
-              version: selected.version ?? null,
-              date: fields.Date ?? fields.date ?? null,
-              source: 'Airtable (filtered)',
-            },
-            { status: 200 },
-          );
+        const sel = selectTextFromFields(fields, versionParam);
+        if (sel?.text) {
+          return NextResponse.json({ text: sel.text, reference: String(fields.Reference ?? fields.reference ?? ''), version: sel.version ?? null, date: fields.Date ?? null, source: 'Airtable (filter UTC)' }, { status: 200 });
         }
-        // If the filtered record exists but doesn't have the requested version textual field,
-        // fall through to fallback logic below.
+      }
+
+      const formulaLocal = `DATETIME_FORMAT({Date},'YYYY-MM-DD')='${localDate}'`;
+      triedFormulas.push(formulaLocal);
+      const resLocal = await fetchWithFormula(AIRTABLE_BASE_ID, AIRTABLE_TABLE, AIRTABLE_API_KEY, formulaLocal);
+      if (Array.isArray(resLocal.records) && resLocal.records.length > 0) {
+        const rec = resLocal.records[0];
+        const fields = rec.fields ?? {};
+        const sel = selectTextFromFields(fields, versionParam);
+        if (sel?.text) {
+          return NextResponse.json({ text: sel.text, reference: String(fields.Reference ?? fields.reference ?? ''), version: sel.version ?? null, date: fields.Date ?? null, source: 'Airtable (filter Local)' }, { status: 200 });
+        }
       }
     } catch (err: any) {
-      // If filter attempt errors (e.g., Date isn't a proper field or formula problem), log and continue to fallback.
-      console.warn('[todays-scripture] Airtable filterByFormula attempt failed:', err?.message ?? err);
+      console.warn('[todays-scripture] filterByFormula attempt failed:', String(err?.message ?? err));
+      // continue to fallback
     }
 
-    // 2) Fallback: fetch a page of records and search locally for today's date in the Date/text field.
-    const pageRecords = await fetchRecordsPage(AIRTABLE_BASE_ID, AIRTABLE_TABLE, AIRTABLE_API_KEY, 200);
-    // Look for a record whose Date column (or potential date fields) parse to today
-    for (const r of pageRecords) {
-      const f = r.fields ?? {};
-      // Check common Date field names
-      const rawDate =
-        f.Date ?? f.date ?? f['Date (text)'] ?? f['DateString'] ?? f['Date String'] ?? null;
-      const parsed = parseCellDateToISO(rawDate);
-      if (parsed === today) {
-        const selected = selectTextFromFields(f, versionParam);
-        if (selected?.text) {
-          return NextResponse.json(
-            {
-              text: selected.text,
-              reference: String(f.Reference ?? f.reference ?? '') || '',
-              version: selected.version ?? null,
-              date: rawDate ?? null,
-              source: 'Airtable (fallback page)',
-            },
-            { status: 200 },
-          );
+    // Fallback: page and search
+    try {
+      const pagePayload = await fetchPage(AIRTABLE_BASE_ID, AIRTABLE_TABLE, AIRTABLE_API_KEY, 200);
+      const records = pagePayload.records ?? [];
+      const testedDates: string[] = [];
+      for (const r of records) {
+        const f = r.fields ?? {};
+        const rawDate = f.Date ?? f.date ?? f['Date (text)'] ?? f['DateString'] ?? f['Date String'] ?? null;
+        const parsed = parseCellDateToISO(rawDate);
+        if (parsed) testedDates.push(parsed);
+        // match against both UTC and local
+        if (parsed === utcDate || parsed === localDate) {
+          const sel = selectTextFromFields(f, versionParam);
+          if (sel?.text) {
+            const resp = { text: sel.text, reference: String(f.Reference ?? f.reference ?? ''), version: sel.version ?? null, date: rawDate ?? null, source: 'Airtable (page fallback)' };
+            return NextResponse.json(debug ? { ...resp, debug: { utcDate, localDate, parsedDates: testedDates.slice(0, 20) } } : resp, { status: 200 });
+          }
         }
       }
+      // nothing found
+      const notFoundResp: any = { error: 'No scripture found for today', checkedDates: { utcDate, localDate, sampleParsedDates: [] } };
+      notFoundResp.checkedDates.sampleParsedDates = testedDates.slice(0, 20);
+      if (debug) {
+        // also include the raw page payload keys for troubleshooting (don't expose API key)
+        notFoundResp.debug = { recordsSampleCount: records.length, triedFormulas };
+      }
+      return NextResponse.json(notFoundResp, { status: 404 });
+    } catch (err: any) {
+      console.error('[todays-scripture] page fetch failed:', String(err?.message ?? err));
+      return NextResponse.json({ error: 'Failed to fetch scripture', detail: String(err?.message ?? err) }, { status: 500 });
     }
-
-    // 3) Nothing found
-    return NextResponse.json({ error: 'No scripture found for today' }, { status: 404 });
   } catch (err: any) {
-    console.error('[todays-scripture] error fetching from Airtable', err?.message ?? err);
+    console.error('[todays-scripture] unexpected error', String(err?.message ?? err));
     return NextResponse.json({ error: 'Failed to fetch scripture', detail: String(err?.message ?? err) }, { status: 500 });
   }
 }
