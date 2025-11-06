@@ -1,28 +1,23 @@
 'use client';
 
 import React, { useEffect, useState } from 'react';
+import type { Scripture } from './types';
 
-type Scripture = {
-  text: string;
-  reference: string;
-  version?: string | null;
-  date?: string | null;
-  source?: string | null;
+type Props = {
+  initialScripture: Scripture | null;
 };
 
 const VERSIONS = ['KJV', 'NKJV', 'NIV'] as const;
 
-export default function TodaysScriptureClient({ initialScripture }: { initialScripture: Scripture | null }) {
+export default function TodaysScriptureClient({ initialScripture }: Props) {
   const [scripture, setScripture] = useState<Scripture | null>(initialScripture);
   const [loading, setLoading] = useState(false);
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // initialize selected version from initialScripture.version or default to 'NIV'
   const initialVersion = (initialScripture?.version ?? 'NIV') as string;
   const [selectedVersion, setSelectedVersion] = useState<string>(initialVersion);
 
-  // If initialScripture later changes (unlikely in current flow), update selectedVersion
   useEffect(() => {
     setSelectedVersion(initialScripture?.version ?? 'NIV');
     setScripture(initialScripture);
@@ -41,8 +36,13 @@ export default function TodaysScriptureClient({ initialScripture }: { initialScr
         return;
       }
       const data = (await res.json()) as Scripture;
-      setScripture(data);
-      // if API returned a version, set it in the selector
+      setScripture({
+        text: String(data.text),
+        reference: data.reference ?? null,
+        version: data.version ?? null,
+        date: data.date ?? null,
+        source: data.source ?? null,
+      });
       if (data?.version) setSelectedVersion(data.version);
     } catch (err: any) {
       setError(err?.message ?? 'Unknown error');
@@ -54,7 +54,7 @@ export default function TodaysScriptureClient({ initialScripture }: { initialScr
   async function copyText() {
     if (!scripture) return;
     try {
-      await navigator.clipboard.writeText(`${scripture.text}\n— ${scripture.reference}`);
+      await navigator.clipboard.writeText(`${scripture.text}\n— ${scripture.reference ?? ''}`);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {
@@ -66,12 +66,12 @@ export default function TodaysScriptureClient({ initialScripture }: { initialScr
     if (!scripture || !(navigator as any).share) return;
     try {
       await (navigator as any).share({
-        title: `Today's Scripture — ${scripture.reference}`,
-        text: `${scripture.text}\n— ${scripture.reference}`,
+        title: `Today's Scripture — ${scripture.reference ?? ''}`,
+        text: `${scripture.text}\n— ${scripture.reference ?? ''}`,
         url: window.location.href,
       });
     } catch {
-      // user cancelled or unsupported
+      // ignore
     }
   }
 
@@ -106,6 +106,16 @@ export default function TodaysScriptureClient({ initialScripture }: { initialScr
       </button>
 
       {error ? <p className="text-sm text-red-600 mt-2">{error}</p> : null}
+
+      {/* Display scripture if present */}
+      {scripture ? (
+        <div className="mt-4 p-4 border rounded bg-white shadow-sm w-full">
+          <p className="whitespace-pre-wrap">{scripture.text}</p>
+          <p className="mt-2 text-sm text-gray-600">— {scripture.reference ?? ''} {scripture.version ? `(${scripture.version})` : ''}</p>
+        </div>
+      ) : (
+        <p className="mt-4 text-sm text-gray-600">We couldn't load today's scripture right now. Try refreshing the page.</p>
+      )}
     </div>
   );
 }
