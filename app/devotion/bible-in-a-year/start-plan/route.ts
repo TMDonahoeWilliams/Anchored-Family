@@ -4,7 +4,7 @@ import { createClient } from '@supabase/supabase-js';
 /**
  * Defensive start-plan route:
  * - Uses SUPABASE_SERVICE_ROLE_KEY to insert into bible_year_selection.
- * - If the insert fails due to missing columns (day_index, household_id, reminder_time, start_date),
+ * - If the insert fails due to missing columns (day_index, household_id, reminder_time, start_date, translation),
  *   retries with those fields removed or remapped (day_index -> current_day; started_at -> start_date mapping handled if needed).
  */
 
@@ -40,7 +40,7 @@ async function resilientInsert(supabase: any, table: string, row: any) {
 
   const msg = String(result.error?.message ?? result.error?.details ?? result.error ?? '');
   // If missing any of these optional columns, remove or remap and retry
-  if (isMissingColumnError(msg, ['day_index', 'household_id', 'reminder_time', 'start_date'])) {
+  if (isMissingColumnError(msg, ['day_index', 'household_id', 'reminder_time', 'start_date', 'translation'])) {
     // remap day_index -> current_day if present
     if ('day_index' in attemptRow) {
       attemptRow.current_day = attemptRow.day_index;
@@ -64,6 +64,10 @@ async function resilientInsert(supabase: any, table: string, row: any) {
     // remove reminder_time if present
     if ('reminder_time' in attemptRow) {
       delete attemptRow.reminder_time;
+    }
+    // remove translation if present
+    if ('translation' in attemptRow) {
+      delete attemptRow.translation;
     }
     // if start_date still present and missing column caused error, remove it
     if ('start_date' in attemptRow) {
@@ -91,6 +95,7 @@ export async function POST(req: Request) {
     const reminderTime: string | undefined = body?.reminderTime; // optional, expected like '08:00:00' or ISO time
     // optional explicit start_date (YYYY-MM-DD) – if client provides one
     const startDate: string | undefined = body?.startDate;
+    const translation: string | undefined = body?.translation; // e.g., "NIV", "KJV"
 
     if (!userId || typeof userId !== 'string') {
       return NextResponse.json({ error: 'Missing or invalid userId in request body' }, { status: 400 });
@@ -112,11 +117,11 @@ export async function POST(req: Request) {
     // include optional fields if provided
     if (householdId) toInsert.household_id = householdId;
     if (reminderTime) toInsert.reminder_time = reminderTime;
-    // include start_date as YYYY-MM-DD if provided or leave it to remapping
+    if (translation) toInsert.translation = translation;
+    // include start_date as YYYY-MM-DD if provided or default
     if (startDate) {
       toInsert.start_date = startDate;
     } else {
-      // add a default start_date value (date part of started_at)
       toInsert.start_date = new Date().toISOString().slice(0, 10);
     }
 
