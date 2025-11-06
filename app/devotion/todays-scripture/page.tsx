@@ -11,7 +11,6 @@ async function fetchInitialScripture(version?: string): Promise<Scripture | null
     if (!res.ok) return null;
     const json = await res.json();
     if (!json || !json.text) return null;
-    // Normalize reference to string or null
     return {
       text: String(json.text),
       reference: json.reference ?? null,
@@ -30,13 +29,17 @@ export default async function TodaysScripturePage() {
   const initialScripture = await fetchInitialScripture(defaultVersion);
 
   return (
-    <div className="prose">
-      <h1>Today's Scripture</h1>
-      <p className="text-muted">A short reflection to begin your day</p>
+    <div className="min-h-screen bg-gray-50 py-10">
+      <div className="max-w-3xl mx-auto px-4">
+        <h1 className="text-3xl font-semibold mb-1">Today's Scripture</h1>
+        <p className="text-gray-600 mb-6">A short reflection to begin your day</p>
 
-      <section className="mt-4">
-        <TodaysScriptureClient initialScripture={initialScripture} />
-      </section>
+        {/* White card around the scripture area */}
+        <div className="bg-white rounded-lg shadow-md p-6">
+          {/* Client component will render the version selector, buttons and scripture content */}
+          <TodaysScriptureClient initialScripture={initialScripture} />
+        </div>
+      </div>
     </div>
   );
 }
