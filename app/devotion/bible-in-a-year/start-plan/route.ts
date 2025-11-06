@@ -1,13 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 
-/**
- * Defensive start-plan route:
- * - Uses SUPABASE_SERVICE_ROLE_KEY to insert into bible_year_selection.
- * - If the insert fails due to missing columns (day_index, household_id, reminder_time, start_date, translation),
- *   retries with those fields removed or remapped (day_index -> current_day; started_at -> start_date mapping handled if needed).
- */
-
 const SUPABASE_URL = process.env.SUPABASE_URL ?? '';
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
 
@@ -15,71 +8,14 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
   console.warn('[start-plan] Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY env var');
 }
 
-function isMissingColumnError(msg: string | undefined, colNames: string[]) {
+function isMissingConstraintError(msg?: string) {
   if (!msg) return false;
   const lower = msg.toLowerCase();
-  // Postgres / Supabase error messages vary; check for common patterns
-  return colNames.some((c) =>
-    lower.includes(`column "${c.toLowerCase()}" does not exist`) ||
-    lower.includes(`could not find the '${c.toLowerCase()}' column`) ||
-    lower.includes(`relation "public.${c.toLowerCase()}" does not exist`)
+  return (
+    lower.includes('no unique or exclusion constraint matching') ||
+    lower.includes('does not have a unique constraint') ||
+    lower.includes('no unique constraint matches the given keys')
   );
-}
-
-/** Attempt insert, retrying if specific columns are missing */
-async function resilientInsert(supabase: any, table: string, row: any) {
-  const tryInsert = async (r: any) => {
-    return await supabase.from(table).insert([r]).select().single();
-  };
-
-  let attemptRow = { ...row };
-
-  // First attempt
-  let result = await tryInsert(attemptRow);
-  if (!result.error) return result;
-
-  const msg = String(result.error?.message ?? result.error?.details ?? result.error ?? '');
-  // If missing any of these optional columns, remove or remap and retry
-  if (isMissingColumnError(msg, ['day_index', 'household_id', 'reminder_time', 'start_date', 'translation'])) {
-    // remap day_index -> current_day if present
-    if ('day_index' in attemptRow) {
-      attemptRow.current_day = attemptRow.day_index;
-      delete attemptRow.day_index;
-    }
-    // If start_date missing but started_at present, map started_at -> start_date (date part)
-    if ('started_at' in attemptRow && !('start_date' in attemptRow)) {
-      try {
-        const d = new Date(attemptRow.started_at);
-        if (!isNaN(d.getTime())) {
-          attemptRow.start_date = d.toISOString().slice(0, 10); // YYYY-MM-DD
-        }
-      } catch {
-        // ignore parse errors
-      }
-    }
-    // remove household_id if present
-    if ('household_id' in attemptRow) {
-      delete attemptRow.household_id;
-    }
-    // remove reminder_time if present
-    if ('reminder_time' in attemptRow) {
-      delete attemptRow.reminder_time;
-    }
-    // remove translation if present
-    if ('translation' in attemptRow) {
-      delete attemptRow.translation;
-    }
-    // if start_date still present and missing column caused error, remove it
-    if ('start_date' in attemptRow) {
-      delete attemptRow.start_date;
-    }
-
-    result = await tryInsert(attemptRow);
-    return result;
-  }
-
-  // Other errors: return original result so caller can handle
-  return result;
 }
 
 export async function POST(req: Request) {
@@ -91,11 +27,10 @@ export async function POST(req: Request) {
     const body = await req.json().catch(() => ({}));
     const userId: string | undefined = body?.userId;
     const planKey: string = (body?.planKey as string) ?? 'one-year-standard';
-    const householdId: string | undefined = body?.householdId; // optional
-    const reminderTime: string | undefined = body?.reminderTime; // optional, expected like '08:00:00' or ISO time
-    // optional explicit start_date (YYYY-MM-DD) – if client provides one
+    const householdId: string | undefined = body?.householdId;
+    const reminderTime: string | undefined = body?.reminderTime;
     const startDate: string | undefined = body?.startDate;
-    const translation: string | undefined = body?.translation; // e.g., "NIV", "KJV"
+    const translation: string | undefined = body?.translation;
 
     if (!userId || typeof userId !== 'string') {
       return NextResponse.json({ error: 'Missing or invalid userId in request body' }, { status: 400 });
@@ -105,34 +40,94 @@ export async function POST(req: Request) {
       auth: { persistSession: false },
     });
 
-    const toInsert: any = {
+    const toUpsert: any = {
       user_id: userId,
       plan_key: planKey,
       started_at: new Date().toISOString(),
-      // prefer day_index if your app uses it; resilientInsert will remap if not present
       day_index: 1,
-      progress: {}, // jsonb
+      progress: {},
+      start_date: startDate ?? new Date().toISOString().slice(0, 10),
     };
+    if (householdId) toUpsert.household_id = householdId;
+    if (reminderTime) toUpsert.reminder_time = reminderTime;
+    if (translation) toUpsert.translation = translation;
 
-    // include optional fields if provided
-    if (householdId) toInsert.household_id = householdId;
-    if (reminderTime) toInsert.reminder_time = reminderTime;
-    if (translation) toInsert.translation = translation;
-    // include start_date as YYYY-MM-DD if provided or default
-    if (startDate) {
-      toInsert.start_date = startDate;
+    // Try upsert first (preferred). onConflict will only work if the DB has a unique constraint on the given columns.
+    try {
+      const upsertResult = await supabase
+        .from('bible_year_selection')
+        .upsert([toUpsert], { onConflict: 'user_id,plan_key' }) // requires unique index on (user_id, plan_key)
+        .select()
+        .single();
+
+      if (upsertResult.error) {
+        // If the error is the "no unique or exclusion constraint matching ..." error, we'll handle below
+        if (!isMissingConstraintError(String(upsertResult.error.message ?? upsertResult.error))) {
+          console.error('[start-plan] upsert error', upsertResult.error);
+          return NextResponse.json({ error: 'Database upsert failed', detail: String(upsertResult.error.message ?? upsertResult.error) }, { status: 502 });
+        }
+        // else fallthrough to fallback flow
+      } else {
+        return NextResponse.json({ ok: true, selection: upsertResult.data }, { status: 201 });
+      }
+    } catch (err: any) {
+      // supabase-js may throw too; check message and fall through if it's the missing-constraint type
+      if (!isMissingConstraintError(String(err?.message ?? err))) {
+        console.error('[start-plan] unexpected upsert throw', err);
+        return NextResponse.json({ error: 'Unexpected DB error', detail: String(err?.message ?? err) }, { status: 500 });
+      }
+      // else fall through to fallback
+    }
+
+    // Fallback: read-then-insert/update (no ON CONFLICT). Slight race condition possible.
+    const { data: existing, error: selectError } = await supabase
+      .from('bible_year_selection')
+      .select('*')
+      .match({ user_id: userId, plan_key: planKey })
+      .maybeSingle();
+
+    if (selectError) {
+      console.error('[start-plan] select error during fallback', selectError);
+      return NextResponse.json({ error: 'Database select failed', detail: String(selectError.message ?? selectError) }, { status: 502 });
+    }
+
+    if (existing) {
+      // update existing
+      const { data: updated, error: updateErr } = await supabase
+        .from('bible_year_selection')
+        .update({
+          // fields to update
+          started_at: toUpsert.started_at,
+          start_date: toUpsert.start_date,
+          day_index: toUpsert.day_index,
+          progress: toUpsert.progress,
+          reminder_time: toUpsert.reminder_time ?? existing.reminder_time,
+          translation: toUpsert.translation ?? existing.translation,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', existing.id)
+        .select()
+        .single();
+
+      if (updateErr) {
+        console.error('[start-plan] update error during fallback', updateErr);
+        return NextResponse.json({ error: 'Database update failed', detail: String(updateErr.message ?? updateErr) }, { status: 502 });
+      }
+      return NextResponse.json({ ok: true, selection: updated }, { status: 200 });
     } else {
-      toInsert.start_date = new Date().toISOString().slice(0, 10);
+      // insert new
+      const { data: inserted, error: insertErr } = await supabase
+        .from('bible_year_selection')
+        .insert([toUpsert])
+        .select()
+        .single();
+
+      if (insertErr) {
+        console.error('[start-plan] insert error during fallback', insertErr);
+        return NextResponse.json({ error: 'Database insert failed', detail: String(insertErr.message ?? insertErr) }, { status: 502 });
+      }
+      return NextResponse.json({ ok: true, selection: inserted }, { status: 201 });
     }
-
-    const { data, error } = await resilientInsert(supabase, 'bible_year_selection', toInsert);
-
-    if (error) {
-      console.error('[start-plan] insert error', error);
-      return NextResponse.json({ error: 'Database insert failed', detail: String(error.message ?? error) }, { status: 502 });
-    }
-
-    return NextResponse.json({ ok: true, selection: data }, { status: 201 });
   } catch (err: any) {
     console.error('[start-plan] unexpected error', err);
     return NextResponse.json({ error: 'Unexpected error', detail: String(err?.message ?? err) }, { status: 500 });
