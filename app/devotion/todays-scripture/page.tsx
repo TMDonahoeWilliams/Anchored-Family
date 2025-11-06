@@ -2,12 +2,17 @@ import React from 'react';
 import type { Scripture } from './types';
 import TodaysScriptureClient from './TodaysScriptureClient';
 
+const ISR_SECONDS = 60; // change as desired
+
 async function fetchInitialScripture(version?: string): Promise<Scripture | null> {
   try {
     const base = process.env.NEXT_PUBLIC_BASE_URL ?? 'http://localhost:3000';
     const url = new URL('/api/devotion/todays-scripture', base);
     if (version) url.searchParams.set('version', version);
-    const res = await fetch(url.toString(), { cache: 'no-store' });
+
+    // Use ISR instead of no-store so Next can prerender the page safely.
+    // `next: { revalidate: ISR_SECONDS }` tells Next to cache the fetch and revalidate after the given seconds.
+    const res = await fetch(url.toString(), { next: { revalidate: ISR_SECONDS } });
     if (!res.ok) return null;
     const json = await res.json();
     if (!json || !json.text) return null;
@@ -25,7 +30,8 @@ async function fetchInitialScripture(version?: string): Promise<Scripture | null
 }
 
 export default async function TodaysScripturePage() {
-  const defaultVersion = 'NIV';
+  // Default to KJV as requested
+  const defaultVersion = 'KJV';
   const initialScripture = await fetchInitialScripture(defaultVersion);
 
   return (
